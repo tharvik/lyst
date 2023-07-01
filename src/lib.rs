@@ -1,5 +1,5 @@
 pub mod mohawk;
-pub use mohawk::{Mohawk, MohawkReader};
+pub use mohawk::Mohawk;
 
 pub mod errors {
     #[derive(thiserror::Error, Debug)]
@@ -30,7 +30,16 @@ pub mod errors {
         TooBigFileTable,
         #[error("uncoherent file table size")]
         UncoherentFileTableSize,
+        #[error("pict parsing: {0}")]
+        PICT(#[from] PICTError),
     }
+
+    #[derive(thiserror::Error, Debug)]
+    pub enum PICTError {
+        #[error("non empty header")]
+        NonEmptyHeader,
+    }
+
 }
 pub use errors::Error;
 pub type Result<T> = std::result::Result<T, Error>;

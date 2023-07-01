@@ -1,6 +1,6 @@
 use lyst::{
     mohawk::{Resource, ResourceID, TypeID},
-    Mohawk, MohawkReader,
+    Mohawk,
 };
 use std::{
     collections::HashMap,
@@ -8,17 +8,18 @@ use std::{
     process::ExitCode,
     result,
 };
-use tokio::{
-    io::{stdout, AsyncWriteExt},
-};
+use tokio::io::{self, stdout};
 
 use clap::{Parser, Subcommand};
 
 fn is_4_chars(arg: &str) -> result::Result<TypeID, String> {
-    arg.bytes()
+    let raw: [u8; 4] = arg
+        .bytes()
         .collect::<Vec<_>>()
         .try_into()
-        .map_err(|_| format!("not 4 ASCII char"))
+        .map_err(|_| format!("not 4 ASCII char"))?;
+
+    Ok(TypeID::from(raw))
 }
 
 #[derive(Parser)]
@@ -42,8 +43,6 @@ enum Commands {
 }
 
 mod errors {
-    use std::string;
-
     use tokio::io;
 
     #[derive(thiserror::Error, Debug)]
@@ -58,9 +57,6 @@ mod errors {
     pub enum ListError {
         #[error(transparent)]
         Lyst(#[from] lyst::Error),
-
-        #[error("type not found")]
-        InvalidUTF8Name(#[from] string::FromUtf8Error),
     }
 
     #[derive(thiserror::Error, Debug)]
@@ -80,18 +76,13 @@ mod errors {
 }
 
 async fn list(path: &Path) -> Result<(), errors::ListError> {
-    use errors::ListError::*;
-
     let print_type = |type_id: &TypeID,
                       resources: &HashMap<ResourceID, Resource>|
      -> Result<_, errors::ListError> {
-        println!(
-            "{}",
-            String::from_utf8(type_id.to_vec()).map_err(InvalidUTF8Name)?,
-        );
+        println!("{}", type_id);
 
         let mut sorted_resources: Vec<_> = resources.iter().collect();
-        sorted_resources.sort_by_key(|(id, _)| *id);
+        sorted_resources.sort_unstable_by_key(|(id, _)| *id);
         println!("   id      name     size flag unknown");
         for (resource_id, resource) in sorted_resources {
             if let Some(name) = &resource.name {
@@ -113,11 +104,10 @@ async fn list(path: &Path) -> Result<(), errors::ListError> {
         Ok(())
     };
 
-    let mut reader = MohawkReader::open(&path).await?;
-    let mohawk = Mohawk::with_reader(&mut reader).await?;
+    let mohawk = Mohawk::open(&path).await?;
 
     let mut sorted_other_types: Vec<_> = mohawk.types.iter().collect();
-    sorted_other_types.sort_by_key(|(t, _)| *t);
+    sorted_other_types.sort_unstable_by_key(|(t, _)| *t);
     for (type_id, resources) in sorted_other_types {
         print_type(type_id, resources)?;
     }
@@ -132,34 +122,50 @@ async fn extract(
 ) -> Result<(), errors::ExtractError> {
     use errors::ExtractError::*;
 
-    let mut reader = MohawkReader::open(&path).await?;
-    let mohawk = Mohawk::with_reader(&mut reader).await?;
-
-    let resource = mohawk
-        .types
-        .get(type_id)
-        .ok_or(TypeNotFound)?
-        .get(resource_id)
-        .ok_or(ResourceNotFound)?;
+    let mohawk = Mohawk::open(path).await?;
 
     match type_id {
-        b"MSND" => {
-            let raw = resource.with_reader(&mut reader).await?;
-            stdout().write_all(&raw).await.map_err(WriteExtracted)
+        TypeID::MSND => {
+            let resource = mohawk
+                .types
+                .get(type_id)
+                .ok_or(TypeNotFound)?
+                .get(resource_id)
+                .ok_or(ResourceNotFound)?;
+
+            io::copy(&mut resource.read(), &mut stdout())
+                .await
+                .map(|_| ())
+                .map_err(WriteExtracted)?;
         }
-        _ => Err(UnsupportedType),
+        TypeID::PICT => {
+            mohawk
+                .get_pict(resource_id)
+                .await
+                .ok_or(ResourceNotFound)??;
+        }
+        _ => return Err(UnsupportedType),
     }
+
+    Ok(())
+}
+
+#[cfg(not(feature = "debug"))]
+fn setup_tracing() {
+    let subscriber = tracing_subscriber::FmtSubscriber::builder()
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+}
+
+#[cfg(feature = "debug")]
+fn setup_tracing() {
+    console_subscriber::init();
 }
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    /* TODO debug
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::TRACE)
-        .finish();
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
-    */
-    console_subscriber::init();
+    setup_tracing();
 
     let cli = CLI::parse();
 

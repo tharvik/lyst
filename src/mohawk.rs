@@ -1,139 +1,83 @@
-// TODO mod msnd;
+pub mod pict;
 
-use std::{
-    collections::HashMap,
-    future::Future,
-    io::SeekFrom,
-    ops::DerefMut,
-    path::{Path, PathBuf},
-    pin::{pin, Pin},
-    sync::{Arc, Mutex},
-    task::{ready, Context, Poll},
-};
+use core::fmt;
+use std::{collections::HashMap, fmt::Write, io::SeekFrom, path::Path};
 use tracing::{trace, trace_span, warn};
 
 use async_stream::try_stream;
-use tokio::{
-    fs,
-    io::{self, AsyncBufReadExt, AsyncReadExt, AsyncSeekExt},
-};
-use tokio_stream::{Stream, StreamExt};
+use tokio::io::AsyncSeekExt;
+use tokio_stream::StreamExt;
 
 use crate::{errors::*, Result};
 
-pub struct MohawkReader {
-    reader: Arc<Mutex<io::BufReader<fs::File>>>,
-    path: PathBuf,
-}
+mod reader;
+use reader::MohawkReader;
 
-impl MohawkReader {
-    pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let mut cloned = PathBuf::new();
-        cloned.push(path);
-
-        trace!("open {}", cloned.display());
-
-        Ok(Self {
-            reader: fs::File::open(&cloned)
-                .await
-                .map(io::BufReader::new)
-                .map(Mutex::new)
-                .map(Arc::new)?,
-            path: cloned,
-        })
-    }
-
-    /// Reopen file to allow thread-independant actions.
-    ///
-    /// Do not seek to current pos
-    async fn reopen(&self) -> Result<Self> {
-        Self::open(&self.path).await
-    }
-
-    async fn read_4_bytes(&mut self) -> Result<[u8; 4]> {
-        let mut buffer = [0u8; 4];
-        self.read_exact(&mut buffer).await?;
-        Ok(buffer)
-    }
-
-    async fn read_string(&mut self) -> Result<String> {
-        let mut reader = self.reader.lock().unwrap();
-
-        let mut resource_name_bytes = vec![];
-        reader.read_until(0u8, &mut resource_name_bytes).await?;
-        resource_name_bytes.remove(resource_name_bytes.len() - 1);
-
-        String::from_utf8(resource_name_bytes).map_err(Error::UTF8)
-    }
-}
-
-impl io::AsyncRead for MohawkReader {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut io::ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        let mut locked = self.reader.lock().unwrap();
-        let pinned_reader: Pin<&mut io::BufReader<fs::File>> = Pin::new(locked.deref_mut());
-        pinned_reader.poll_read(cx, buf)
-    }
-}
-
-impl io::AsyncSeek for MohawkReader {
-    fn start_seek(self: Pin<&mut Self>, position: io::SeekFrom) -> std::io::Result<()> {
-        Pin::new(self.reader.lock().unwrap().deref_mut()).start_seek(position)
-    }
-
-    fn poll_complete(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<u64>> {
-        Pin::new(self.reader.lock().unwrap().deref_mut()).poll_complete(cx)
-    }
-}
-
-impl Stream for MohawkReader {
-    type Item = Result<u8>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let got = ready!(pin!(pin!(self.reader.lock().unwrap().deref_mut()).read_u8()).poll(cx));
-        Poll::Ready(match got {
-            Ok(b) => Some(Ok(b)),
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => None,
-            Err(e) => Some(Err(Error::IO(e))),
-        })
-    }
-}
+use self::pict::PICT;
 
 pub struct Resource {
     pub name: Option<String>,
     pub file: File,
+    reader: MohawkReader,
 }
 
 pub struct File {
     offset: u64,
-    pub size: usize,
+    pub size: u64,
     pub flag: u8,
     pub unknown: u16,
 }
 
-impl File {
-    pub async fn with_reader(&self, reader: &mut MohawkReader) -> Result<Vec<u8>> {
-        trace!("read {} bytes at offset {}", self.size, self.offset);
-
-        reader.seek(SeekFrom::Start(self.offset)).await?;
-
-        let mut raw = vec![0; self.size];
-        reader.read_exact(&mut raw).await?;
-
-        Ok(raw)
-    }
-}
-
 impl Resource {
-    pub async fn with_reader(&self, reader: &mut MohawkReader) -> Result<Vec<u8>> {
-        self.file.with_reader(reader).await
+    pub async fn new(
+        &self,
+        name: Option<String>,
+        file: File,
+        mut reader: MohawkReader,
+    ) -> Result<Self> {
+        reader.seek(SeekFrom::Start(file.offset)).await?;
+
+        Ok(Self { name, file, reader })
+    }
+
+    pub fn read(&self) -> MohawkReader {
+        self.reader.clone()
     }
 }
 
-pub type TypeID = [u8; 4];
+#[derive(PartialEq, Eq, Hash, PartialOrd, Ord, Clone)]
+
+pub enum TypeID {
+    PICT,
+    MSND,
+    Unknown([u8; 4]),
+}
+
+impl From<[u8; 4]> for TypeID {
+    fn from(value: [u8; 4]) -> Self {
+        match &value {
+            b"PICT" => Self::PICT,
+            b"MSND" => Self::MSND,
+            _ => Self::Unknown(value),
+        }
+    }
+}
+
+impl fmt::Display for TypeID {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PICT => f.write_str("PICT"),
+            Self::MSND => f.write_str("MSND"),
+            Self::Unknown(arr) => {
+                for b in arr {
+                    f.write_char(char::from(*b))?
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 pub type ResourceID = u16;
 
 type FileID = u16;
@@ -145,7 +89,11 @@ pub struct Mohawk {
 }
 
 impl Mohawk {
-    pub async fn with_reader(mut reader: &mut MohawkReader) -> Result<Self> {
+    pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let _span_ = trace_span!("open", "path={}", path.as_ref().display()).entered();
+
+        let mut reader = MohawkReader::open(path).await?;
+
         let total_file_size = parse_iff_header(&mut reader).await?;
         trace!(total_file_size, "iff parsed");
         let RSRCHeader {
@@ -164,12 +112,10 @@ impl Mohawk {
             .seek(SeekFrom::Start(resource_dir_offset.into()))
             .await?;
         let name_list_offset_in_resource_dir = reader.read_u16().await?;
-        let type_tables = parse_type_table(&mut reader).await?;
-        trace!(
-            name_list_offset_in_resource_dir,
-            "types table parsed: {} found",
-            type_tables.len()
-        );
+        let mut type_tables = parse_type_table(&mut reader).await?;
+        trace!("types table parsed: {} found", type_tables.len());
+        // reduce backward seek
+        type_tables.sort_unstable_by_key(|(_, t)| t.resource_table_offset_in_resource_dir);
 
         reader
             .seek(SeekFrom::Start(
@@ -178,17 +124,11 @@ impl Mohawk {
             .await?;
         let mut files = parse_file_table(&mut reader, file_table_size).await?;
 
-        let types_tables = try_stream! {
+        let reader_dup = reader.clone();
+        let types_without_files = try_stream! {
+            let mut reader = reader_dup;
             for (resource_type, entry) in type_tables {
-                let _span_ = trace_span!(
-                    "parse type",
-                    "{}{}{}{}",
-                    resource_type[0],
-                    resource_type[1],
-                    resource_type[2],
-                    resource_type[3]
-                )
-                .entered();
+                let _span_ = trace_span!("parse", "type" = %resource_type).entered();
 
                 reader
                     .seek(SeekFrom::Start(
@@ -196,16 +136,19 @@ impl Mohawk {
                     ))
                     .await?;
                 let resource_table = parse_resource_table(&mut reader).await?;
+                trace!("got {} resources", resource_table.len());
 
                 reader
                     .seek(SeekFrom::Start(
                         resource_dir_offset as u64 + entry.name_table_offset_in_resource_dir as u64,
                     ))
                     .await?;
-                let name_table = parse_name_table(&mut reader).await?;
+                let mut name_table = parse_name_table(&mut reader).await?;
+                trace!("got {} names", name_table.len());
+                name_table.sort_unstable_by_key(|(_, off)| *off); // try to make linear access
 
-                let mut reader = reader.reopen().await?;
-                let resource_id_to_name: HashMap<ResourceID, String> = try_stream! {
+                let mut reader = reader.clone();
+                let mut resource_id_to_name: HashMap<ResourceID, String> = try_stream! {
                     for (resource_id, name_offset_in_name_list) in name_table {
                         reader
                             .seek(SeekFrom::Start(
@@ -223,53 +166,58 @@ impl Mohawk {
                 .into_iter()
                 .collect();
 
-                yield (resource_type, resource_table, resource_id_to_name)
+                let resources = resource_table
+                    .into_iter()
+                    .map(|(resource_id, file_id)| (
+                        resource_id,
+                        file_id,
+                        resource_id_to_name.remove(&file_id),
+                    ))
+                    .collect::<Vec<_>>();
+                if !resource_id_to_name.is_empty() {
+                    warn!("{} names unmatched to resources", resource_id_to_name.len())
+                }
+
+                yield (resource_type, resources);
             }
         }
-        .collect::<Result<Vec<_>>>()
-        .await?;
+        .collect::<Result<Vec<_>>>().await?;
 
-        let types = types_tables
+        let types = types_without_files
             .into_iter()
-            .map(|(resource_type, resource_table, mut resource_id_to_name)| {
+            .map(|(resource_type, resources)| {
                 Ok((
                     resource_type,
-                    resource_table
+                    resources
                         .into_iter()
-                        .map(|(resource_id, file_id)| {
+                        .map(|(resource_id, file_id, name)| {
                             Ok((
                                 resource_id,
                                 Resource {
-                                    name: resource_id_to_name.remove(&file_id),
+                                    name,
                                     file: files
                                         .remove(&file_id)
                                         .ok_or(InvalidHeaderError::UnknownFileID)?,
+                                    reader: reader.clone(),
                                 },
                             ))
                         })
                         .collect::<Result<_>>()?,
-                    resource_id_to_name,
                 ))
             })
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            // TODO unefficient check
-            .map(|(resource_type, resources, resource_id_to_name)| {
-                if !resource_id_to_name.is_empty() {
-                    warn!("{} names unmatched to resources", resource_id_to_name.len())
-                }
-                (resource_type, resources)
-            })
-            .collect::<HashMap<TypeID, HashMap<_, _>>>();
+            .collect::<Result<_>>()?;
 
         if !files.is_empty() {
             warn!("{} files unmatched to resources", files.len())
         }
 
-        Ok(Self {
-            //msnd: types.get(b"MSND").map(|m| m.clone()),
-            types,
-        })
+        Ok(Self { types })
+    }
+
+    pub async fn get_pict(&self, id: &ResourceID) -> Option<Result<PICT>> {
+        trace!("get pict");
+        let res = self.types.get(&TypeID::PICT).and_then(|m| m.get(id))?;
+        Some(PICT::parse(res.read()).await)
     }
 }
 
@@ -326,7 +274,7 @@ async fn parse_type_table(reader: &mut MohawkReader) -> Result<Vec<(TypeID, Type
     try_stream! {
         for _ in 0..type_entry_count {
             yield (
-                reader.read_4_bytes().await?,
+                TypeID::from(reader.read_4_bytes().await?),
                 TypeTableEntry {
                     resource_table_offset_in_resource_dir: reader.read_u16().await?,
                     name_table_offset_in_resource_dir: reader.read_u16().await?,
@@ -340,7 +288,6 @@ async fn parse_type_table(reader: &mut MohawkReader) -> Result<Vec<(TypeID, Type
 
 async fn parse_name_table(reader: &mut MohawkReader) -> Result<Vec<(ResourceID, u16)>> {
     let names_count = reader.read_u16().await?;
-    trace!("got {} names", names_count);
 
     try_stream! {
         for _ in 0..names_count {
@@ -357,7 +304,6 @@ async fn parse_name_table(reader: &mut MohawkReader) -> Result<Vec<(ResourceID, 
 /// parse the resource table, making a mapping from ResourceID to file table index
 async fn parse_resource_table(reader: &mut MohawkReader) -> Result<Vec<(ResourceID, u16)>> {
     let resource_entry_count = reader.read_u16().await?;
-    trace!("got {} resources", resource_entry_count);
 
     try_stream! {
         for _ in 0..resource_entry_count {
@@ -388,7 +334,7 @@ async fn parse_file_table(
             let offset = reader.read_u32().await? as u64;
 
             let size_and_flag = reader.read_u32().await?;
-            let size = (size_and_flag >> 8) as usize;
+            let size = (size_and_flag >> 8) as u64;
             let flag = size_and_flag.to_be_bytes()[3];
 
             let unknown = reader.read_u16().await?;
@@ -406,6 +352,8 @@ async fn parse_file_table(
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     static MYST_INSTALL_DIR: &str = "Myst Masterpiece Edition";
@@ -413,23 +361,7 @@ mod tests {
     async fn test_known_file(filename: &str) {
         let path = Path::new(MYST_INSTALL_DIR).join(filename);
 
-        let mut reader = MohawkReader::open(path).await.expect("to open Mohawk file");
-        Mohawk::with_reader(&mut reader)
-            .await
-            .expect("to parse Mohawk file")
-            .types
-            .iter()
-            .for_each(|(type_id, resources)| {
-                println!(
-                    "type {}{}{}{}",
-                    type_id[0], type_id[1], type_id[2], type_id[3]
-                );
-                resources.iter().for_each(|(resource_id, resource)| {
-                    if let Some(name) = &resource.name {
-                        println!("  resource {:?}", name);
-                    }
-                })
-            });
+        Mohawk::open(&path).await.expect("to parse Mohawk file");
     }
 
     #[tokio::test]

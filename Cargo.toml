@@ -5,19 +5,23 @@ authors = ["tharvik <tharvik@users.noreply.github.com>"]
 edition = "2021"
 
 [dependencies]
+async-stream = "0.3"
 clap = { version = "4", features = ["derive"] }
+console-subscriber = { version = "0.1", optional = true }
 thiserror = "1"
+owning_ref = "0.4"
+pin-project = "1"
 tokio = { version = "1", features = [
   "fs",
   "io-util",
+  "io-std",
   "macros",
   "rt-multi-thread",
   "rt",
-  "tracing", # debug
 ] }
 tokio-stream = "0.1"
-async-stream = "0.3"
 tracing = "0.1"
-console-subscriber = "0.1"
-pin-project = "1"
-owning_ref = "0.4"
+tracing-subscriber = "0.3"
+
+[features]
+debug = ["dep:console-subscriber", "tokio/tracing"]
