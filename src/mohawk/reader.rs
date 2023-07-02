@@ -7,7 +7,7 @@ use std::{
     task::{ready, Context, Poll},
     vec,
 };
-use tracing::trace;
+use tracing::{trace, trace_span, warn, Instrument};
 
 use tokio::{
     fs,
@@ -20,10 +20,8 @@ struct Command {
     cmd: Commands,
 }
 
-// TODO flatten
 enum Commands {
     ReadBuf {
-        capacity: usize,
         resp: oneshot::Sender<io::Result<Vec<u8>>>,
     },
 }
@@ -37,16 +35,12 @@ impl fmt::Display for Command {
 impl fmt::Display for Commands {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Commands::ReadBuf { capacity, .. } => {
-                f.write_fmt(format_args!("ReadBuf(capacity={})", capacity))
-            }
+            Commands::ReadBuf { .. } => f.write_str("FillBuf"),
         }
     }
 }
 
 type BoxedFuture<T> = Pin<Box<dyn Future<Output = T>>>;
-
-const BUFFER_SIZE: usize = 1024;
 
 #[pin_project::pin_project]
 pub struct MohawkReader {
@@ -54,7 +48,7 @@ pub struct MohawkReader {
     pos: u64,
 
     #[pin]
-    read_buf: Option<BoxedFuture<io::Result<Vec<u8>>>>,
+    fill_buf: Option<BoxedFuture<io::Result<Vec<u8>>>>,
     buffer: Vec<u8>,
 }
 
@@ -66,7 +60,7 @@ impl MohawkReader {
             agent: Handler::open(path).await?.spawn(),
             pos: 0,
 
-            read_buf: None,
+            fill_buf: None,
             buffer: Vec::new(),
         })
     }
@@ -93,17 +87,13 @@ impl MohawkReader {
         Ok(buffer)
     }
 
-    async fn read_buf(
-        agent: mpsc::Sender<Command>,
-        pos: u64,
-        capacity: usize,
-    ) -> io::Result<Vec<u8>> {
+    async fn fill_buf(agent: mpsc::Sender<Command>, pos: u64) -> io::Result<Vec<u8>> {
         let (tx, rx) = oneshot::channel();
 
         agent
             .send(Command {
                 pos,
-                cmd: Commands::ReadBuf { capacity, resp: tx },
+                cmd: Commands::ReadBuf { resp: tx },
             })
             .await
             .ok();
@@ -111,34 +101,28 @@ impl MohawkReader {
         rx.await.unwrap()
     }
 
-    fn poll_read_inner(
-        self: &mut Pin<&mut Self>,
+    fn poll_fill_buf_inner<'a>(
+        self: &mut Pin<&'a mut Self>,
         cx: &mut Context<'_>,
-        size: usize,
     ) -> Poll<io::Result<()>> {
-        trace!("async read inner: size={}", size);
+        if !self.as_mut().project().buffer.is_empty() {
+            return Poll::Ready(Ok(()));
+        }
 
         let mut this = self.as_mut().project();
-        if !this.buffer.is_empty() {
-            trace!("async read: buffer not empty, using it direclty");
-            return Poll::Ready(Ok(()));
-        };
 
-        if this.read_buf.is_none() {
-            trace!("async read inner: #nofuture, building it");
-            *this.read_buf = Some(Box::pin(Self::read_buf(
-                this.agent.clone(),
-                *this.pos,
-                size,
-            )));
-        };
+        if this.fill_buf.is_none() {
+            trace!("buffer empty, new request");
+            *this.fill_buf = Some(Box::pin(Self::fill_buf(this.agent.clone(), *this.pos)));
+        }
 
-        let resp = this.read_buf.iter_mut().next().unwrap();
-        let got = ready!(resp.as_mut().poll(cx));
-        *this.read_buf = None;
+        let fut = this.fill_buf.iter_mut().next().unwrap();
+        let got = ready!(fut.as_mut().poll(cx));
+        *this.fill_buf = None;
 
-        Poll::Ready(got.map(|read| {
-            *this.buffer = read;
+        Poll::Ready(got.map(|v| {
+            trace!("got buffer, keeping it");
+            *this.buffer = v;
         }))
     }
 }
@@ -149,29 +133,26 @@ impl io::AsyncRead for MohawkReader {
         cx: &mut Context<'_>,
         buf: &mut io::ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        trace!("async read: size={}", buf.remaining());
+        let _span_ = trace_span!("read").entered();
 
-        let got = ready!(self.poll_read_inner(cx, buf.remaining()));
-
-        Poll::Ready(got.map(|_| {
+        self.poll_fill_buf_inner(cx).map_ok(|_| {
             let size = cmp::min(buf.remaining(), self.buffer.len());
             buf.put_slice(self.buffer.get(0..size).unwrap());
             io::AsyncBufRead::consume(self, size);
-        }))
+        })
     }
 }
 
 impl io::AsyncBufRead for MohawkReader {
     fn poll_fill_buf(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
-        trace!("buf read: fill buf");
+        let _span_ = trace_span!("fill buf").entered();
 
-        let got = ready!(self.poll_read_inner(cx, BUFFER_SIZE));
-
-        Poll::Ready(got.map(|_| self.get_mut().buffer.as_slice()))
+        self.poll_fill_buf_inner(cx)
+            .map_ok(|_| self.get_mut().buffer.as_slice())
     }
 
     fn consume(self: Pin<&mut Self>, amt: usize) {
-        trace!("buf read: consume {}", amt);
+        let _span_ = trace_span!("consume", amount = amt).entered();
 
         let this = self.project();
 
@@ -182,9 +163,21 @@ impl io::AsyncBufRead for MohawkReader {
 
 // we don't actually send anything to the handler as seeking is done on every request
 impl io::AsyncSeek for MohawkReader {
-    fn start_seek(self: Pin<&mut Self>, position: SeekFrom) -> io::Result<()> {
-        match position {
-            SeekFrom::Start(cur) => self.get_mut().pos = cur,
+    fn start_seek(mut self: Pin<&mut Self>, seek_to: SeekFrom) -> io::Result<()> {
+        match seek_to {
+            SeekFrom::Start(cur) => {
+                let is_within_buffer = cur > self.pos && cur - self.pos < self.buffer.len() as u64;
+                if is_within_buffer {
+                    let skip = (cur - self.pos) as usize;
+                    io::AsyncBufRead::consume(self.as_mut(), skip)
+                } else {
+                    // clear state
+                    self.as_mut().fill_buf = None;
+                    self.as_mut().buffer = Vec::new();
+                }
+
+                self.pos = cur;
+            }
             _ => todo!("impl other seeks"),
         }
 
@@ -202,7 +195,7 @@ impl Clone for MohawkReader {
             agent: self.agent.clone(),
             pos: self.pos,
 
-            read_buf: None,
+            fill_buf: None,
             buffer: Vec::new(),
         }
     }
@@ -222,39 +215,49 @@ impl Handler {
     }
 
     async fn seek(&mut self, seek_to: u64) -> io::Result<()> {
-        if self.pos == seek_to {
-            return Ok(());
-        }
+        let is_within_buffer =
+            seek_to > self.pos && seek_to - self.pos < self.reader.buffer().len() as u64;
+        let ret = if is_within_buffer {
+            trace!("seek fast forward!");
 
-        trace!("seeking to {}", seek_to);
-        let ret = self.reader.seek(SeekFrom::Start(seek_to)).await.map(|_| ());
+            let skip = (seek_to - self.pos) as usize;
+            self.reader.consume(skip);
+
+            Ok(())
+        } else {
+            trace!("seeking to 0x{:08x}", seek_to);
+            self.reader.seek(SeekFrom::Start(seek_to)).await.map(|_| ())
+        };
+
         self.pos = seek_to;
         ret
+    }
+
+    async fn fill_buf(&mut self, at_pos: u64) -> io::Result<Vec<u8>> {
+        self.seek(at_pos).await?;
+        let buf = Vec::from(self.reader.fill_buf().await?);
+        trace!("got {} bytes", buf.len());
+        Ok(Vec::from(buf))
     }
 
     fn spawn(mut self) -> mpsc::Sender<Command> {
         let (tx, mut rx) = mpsc::channel(10);
 
-        tokio::spawn(async move {
-            while let Some(Command { pos, cmd }) = rx.recv().await {
-                match cmd {
-                    Commands::ReadBuf { capacity, resp } => resp
-                        .send(
-                            async {
-                                trace!("exec ReadBuf for {}", capacity);
-                                self.seek(pos).await?;
-                                let mut buf = Vec::with_capacity(capacity);
-                                self.reader.read_buf(&mut buf).await?;
-                                trace!("exec ReadBuf returns {}", buf.len());
-                                self.pos += buf.len() as u64;
-                                Ok(buf)
+        tokio::spawn(
+            async move {
+                while let Some(Command { pos, cmd }) = rx.recv().await {
+                    trace!("exec {}", cmd);
+                    match cmd {
+                        Commands::ReadBuf { resp } => {
+                            if resp.send(self.fill_buf(pos).await).is_err() {
+                                warn!("receiver gone");
                             }
-                            .await,
-                        )
-                        .unwrap(),
+                        }
+                    };
                 }
             }
-        });
+            .instrument(trace_span!("handler")),
+        );
 
         tx
     }
