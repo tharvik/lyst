@@ -9,7 +9,6 @@ async-stream = "0.3"
 clap = { version = "4", features = ["derive"] }
 console-subscriber = { version = "0.1", optional = true }
 thiserror = "1"
-owning_ref = "0.4"
 pin-project = "1"
 tokio = { version = "1", features = [
   "fs",

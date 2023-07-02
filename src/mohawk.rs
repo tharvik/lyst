@@ -5,7 +5,7 @@ use std::{collections::HashMap, fmt::Write, io::SeekFrom, path::Path};
 use tracing::{trace, trace_span, warn};
 
 use async_stream::try_stream;
-use tokio::io::AsyncSeekExt;
+use tokio::io::{self, AsyncReadExt, AsyncSeekExt};
 use tokio_stream::StreamExt;
 
 use crate::{errors::*, Result};
@@ -29,12 +29,7 @@ pub struct File {
 }
 
 impl Resource {
-    pub async fn new(
-        &self,
-        name: Option<String>,
-        file: File,
-        mut reader: MohawkReader,
-    ) -> Result<Self> {
+    pub async fn new(name: Option<String>, file: File, mut reader: MohawkReader) -> Result<Self> {
         reader.seek(SeekFrom::Start(file.offset)).await?;
 
         Ok(Self { name, file, reader })
@@ -46,7 +41,6 @@ impl Resource {
 }
 
 #[derive(PartialEq, Eq, Hash, PartialOrd, Ord, Clone)]
-
 pub enum TypeID {
     PICT,
     MSND,
@@ -183,7 +177,7 @@ impl Mohawk {
         }
         .collect::<Result<Vec<_>>>().await?;
 
-        let types = types_without_files
+        let types_without_resources = types_without_files
             .into_iter()
             .map(|(resource_type, resources)| {
                 Ok((
@@ -193,23 +187,43 @@ impl Mohawk {
                         .map(|(resource_id, file_id, name)| {
                             Ok((
                                 resource_id,
-                                Resource {
-                                    name,
-                                    file: files
-                                        .remove(&file_id)
-                                        .ok_or(InvalidHeaderError::UnknownFileID)?,
-                                    reader: reader.clone(),
-                                },
+                                files
+                                    .remove(&file_id)
+                                    .ok_or(InvalidHeaderError::UnknownFileID)?,
+                                name,
                             ))
                         })
-                        .collect::<Result<_>>()?,
+                        .collect::<Result<Vec<_>>>()?,
                 ))
             })
-            .collect::<Result<_>>()?;
-
+            .collect::<Result<Vec<_>>>()?;
         if !files.is_empty() {
             warn!("{} files unmatched to resources", files.len())
         }
+
+        let types = try_stream! {
+            for (resource_type, resources) in types_without_resources {
+                let reader = reader.clone();
+                yield (
+                    resource_type,
+                    try_stream! {
+                        for (id, file, name) in resources {
+                            yield (
+                                id,
+                                Resource::new(name, file, reader.clone()).await?,
+                            );
+                        }
+                    }
+                    .collect::<Result<Vec<_>>>().await?
+                    .into_iter().collect::<HashMap<ResourceID, Resource>>(),
+                );
+            }
+
+        }
+        .collect::<Result<Vec<_>>>()
+        .await?
+        .into_iter()
+        .collect::<HashMap<TypeID, _>>();
 
         Ok(Self { types })
     }
@@ -345,9 +359,10 @@ async fn parse_file_table(
             )
         }
     }
-    .collect::<Result<Vec<_>>>()
+    .collect::<io::Result<Vec<_>>>()
     .await
     .map(|t| t.into_iter().collect())
+    .map_err(Error::IO)
 }
 
 #[cfg(test)]
@@ -365,7 +380,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_know_file_myst() {
-        test_known_file("MYST.DAT").await
+    async fn test_know_files() {
+        for filename in [
+            "CHANNEL.DAT",
+            "CREDITS.DAT",
+            "DUNNY.DAT",
+            "INTRO.DAT",
+            "MECHAN.DAT",
+            "MYST.DAT",
+            "SELEN.DAT",
+            "STONE.DAT",
+            "SYSTEM.DAT",
+        ] {
+            test_known_file(filename).await
+        }
     }
 }

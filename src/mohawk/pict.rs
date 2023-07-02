@@ -17,6 +17,9 @@ impl PICT {
             Err(InvalidHeaderError::PICT(PICTError::NonEmptyHeader))?
         }
 
+        let mut _useless_header = [0u8; 10];
+        reader.read_exact(&mut empty_header).await?;
+
         Ok(PICT)
     }
 }
