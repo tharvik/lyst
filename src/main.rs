@@ -150,15 +150,13 @@ async fn extract(
     Ok(())
 }
 
-#[cfg(not(feature = "debug"))]
+#[cfg(not(feature = "dep:console-subscriber"))]
 fn setup_tracing() {
-    let subscriber = tracing_subscriber::FmtSubscriber::builder()
-        .with_max_level(tracing::Level::TRACE)
-        .finish();
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+    tracing::subscriber::set_global_default(tracing_subscriber::FmtSubscriber::default())
+        .expect("setting default subscriber failed");
 }
 
-#[cfg(feature = "debug")]
+#[cfg(feature = "dep:console-subscriber")]
 fn setup_tracing() {
     console_subscriber::init();
 }

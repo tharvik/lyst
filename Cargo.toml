@@ -7,7 +7,6 @@ edition = "2021"
 [dependencies]
 async-stream = "0.3"
 clap = { version = "4", features = ["derive"] }
-console-subscriber = { version = "0.1", optional = true }
 thiserror = "1"
 pin-project = "1"
 tokio = { version = "1", features = [
@@ -21,6 +20,17 @@ tokio = { version = "1", features = [
 tokio-stream = "0.1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
+sdl2 = { version = "0.35.2", default-features = false, features = [
+  "gfx",
+  "image",
+  "mixer",
+] }
 
-[features]
-debug = ["dep:console-subscriber", "tokio/tracing"]
+[dev-dependencies]
+console-subscriber = { version = "0.1" }
+criterion = { version = "0.4", features = ["async_tokio", "html_reports"] }
+tokio = { version = "1", features = ["tracing"] }
+
+[[bench]]
+name = "mohawk"
+harness = false
