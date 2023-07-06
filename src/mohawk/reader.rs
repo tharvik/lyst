@@ -336,4 +336,34 @@ impl Handler {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use std::path::Path;
+
+    use tokio_stream::StreamExt;
+
+    use super::MohawkReader;
+    use crate::tests::get_known_files;
+
+    async fn take_more(path: impl AsRef<Path>) {
+        let reader = MohawkReader::open(path)
+            .await
+            .expect("to open path")
+            .take(0);
+
+        let mut buf = [0u8; 1];
+        assert_eq!(
+            reader
+                .take(1)
+                .read(&mut buf)
+                .await
+                .expect("to notice EOF gracefully"),
+            0,
+            "not end of file but reader should be finished"
+        )
+    }
+
+    #[tokio::test]
+    async fn take_more_than_already_taken_returns_smallest() {
+        get_known_files().then(take_more).collect::<()>().await
+    }
+}

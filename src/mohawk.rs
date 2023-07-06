@@ -392,32 +392,17 @@ async fn parse_file_table(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::PathBuf;
 
     use super::*;
+    use crate::tests::get_known_files;
 
-    static MYST_INSTALL_DIR: &str = "Myst Masterpiece Edition";
-
-    async fn test_known_file(filename: &str) {
-        let path = Path::new(MYST_INSTALL_DIR).join(filename);
-
+    async fn open(path: PathBuf) {
         Mohawk::open(&path).await.expect("to parse Mohawk file");
     }
 
     #[tokio::test]
-    async fn test_know_files() {
-        for filename in [
-            "CHANNEL.DAT",
-            "CREDITS.DAT",
-            "DUNNY.DAT",
-            "INTRO.DAT",
-            "MECHAN.DAT",
-            "MYST.DAT",
-            "SELEN.DAT",
-            "STONE.DAT",
-            "SYSTEM.DAT",
-        ] {
-            test_known_file(filename).await
-        }
+    async fn open_known_files() {
+        get_known_files().then(open).collect::<()>().await
     }
 }
