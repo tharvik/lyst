@@ -5,7 +5,7 @@ use tokio::io;
 use tokio_stream::{Stream, StreamExt};
 use tracing::{trace, warn};
 
-use encoding::Encoding;
+use encoding_rs::WINDOWS_1252;
 use strum::FromRepr;
 
 use super::reader::{self, MohawkReader};
@@ -25,8 +25,8 @@ pub enum Error {
     UnsupportedOpcode(u16),
     #[error("unexpected opcode {0:04x}")]
     UnexpectedOpcode(u16),
-    #[error("unable to read as ISO-8859-1: {0:?}")]
-    InvalidStringFormat(Cow<'static, str>),
+    #[error("unable to read bytes as CP-1252")]
+    InvalidStringFormat,
     #[error("end of picture found but reader is not empty")]
     DataRemaining,
 }
@@ -285,9 +285,10 @@ impl Operation {
 
                 let mut raw = vec![0u8; count as usize];
                 reader.read_exact(&mut raw).await?;
-                let text = encoding::all::ISO_8859_1
-                    .decode(&raw, encoding::DecoderTrap::Strict)
-                    .map_err(Error::InvalidStringFormat)?;
+                encoding_rs::Encoding::for_bom(&raw).unwrap();
+                let text = WINDOWS_1252
+                    .decode_without_bom_handling_and_without_replacement(&raw)
+                    .ok_or(Error::InvalidStringFormat)?;
 
                 if count % 2 == 0
                 // count is a byte so we start at odd bytes
@@ -295,7 +296,10 @@ impl Operation {
                     skip_filler(reader).await?;
                 }
 
-                Self::LongText { location, text }
+                Self::LongText {
+                    location,
+                    text: text.into_owned(),
+                }
             }
             Opcode::OpEndPic => Self::OpEndPic, // doc says 2 bytes extra but not reality
             Opcode::Version => Self::Version,
