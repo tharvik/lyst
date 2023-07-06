@@ -4,6 +4,7 @@ use std::{
     io::SeekFrom,
     path::Path,
     pin::{pin, Pin},
+    string,
     task::{ready, Context, Poll},
     vec,
 };
@@ -14,6 +15,15 @@ use tokio::{
     io::{self, AsyncBufReadExt, AsyncReadExt, AsyncSeekExt},
     sync::{mpsc, oneshot},
 };
+
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+    #[error("parse string: {0}")]
+    UTF8(#[from] string::FromUtf8Error),
+    #[error(transparent)]
+    IO(#[from] io::Error),
+}
+pub type Result<T> = std::result::Result<T, Error>;
 
 struct Command {
     pos: u64,
@@ -46,6 +56,7 @@ type BoxedFuture<T> = Pin<Box<dyn Future<Output = T>>>;
 pub struct MohawkReader {
     agent: mpsc::Sender<Command>,
     pos: u64,
+    remaining: Option<usize>,
 
     #[pin]
     fill_buf: Option<BoxedFuture<io::Result<Vec<u8>>>>,
@@ -53,19 +64,36 @@ pub struct MohawkReader {
 }
 
 impl MohawkReader {
-    pub async fn open(path: impl AsRef<Path>) -> io::Result<Self> {
+    // Open the given file
+    pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
         trace!("open {}", path.as_ref().display());
 
         Ok(Self {
             agent: Handler::open(path).await?.spawn(),
             pos: 0,
+            remaining: None,
 
             fill_buf: None,
             buffer: Vec::new(),
         })
     }
 
-    pub async fn read_string(&mut self) -> crate::Result<String> {
+    // New reader reading at most the given number of bytes
+    pub fn take(&self, size: usize) -> Self {
+        trace!("take {}", size);
+
+        Self {
+            remaining: Some(
+                self.remaining
+                    .map(|old| cmp::min(old, size))
+                    .unwrap_or(size),
+            ),
+            ..self.clone()
+        }
+    }
+
+    /// Read a NULL-terminated string
+    pub async fn read_string(&mut self) -> Result<String> {
         let mut c_string = vec![];
         self.read_until(0u8, &mut c_string).await?;
         c_string.remove(c_string.len() - 1);
@@ -73,19 +101,46 @@ impl MohawkReader {
         Ok(String::from_utf8(c_string)?)
     }
 
-    pub async fn read_2_bytes(&mut self) -> io::Result<[u8; 2]> {
-        let mut buffer = [0u8; 2];
-        self.read_exact(&mut buffer).await?;
-
-        Ok(buffer)
-    }
-
-    pub async fn read_4_bytes(&mut self) -> io::Result<[u8; 4]> {
+    pub async fn read_4_bytes(&mut self) -> Result<[u8; 4]> {
         let mut buffer = [0u8; 4];
         self.read_exact(&mut buffer).await?;
 
         Ok(buffer)
     }
+
+    // forward to have our Result
+
+    pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        AsyncReadExt::read(self, buf).await.map_err(Error::IO)
+    }
+    pub async fn read_u8(&mut self) -> Result<u8> {
+        AsyncReadExt::read_u8(self).await.map_err(Error::IO)
+    }
+    pub async fn read_u16(&mut self) -> Result<u16> {
+        AsyncReadExt::read_u16(self).await.map_err(Error::IO)
+    }
+    pub async fn read_i16(&mut self) -> Result<i16> {
+        AsyncReadExt::read_i16(self).await.map_err(Error::IO)
+    }
+    pub async fn read_u32(&mut self) -> Result<u32> {
+        AsyncReadExt::read_u32(self).await.map_err(Error::IO)
+    }
+    pub async fn read_u64(&mut self) -> Result<u64> {
+        AsyncReadExt::read_u64(self).await.map_err(Error::IO)
+    }
+    pub async fn read_exact(&mut self, data: &mut [u8]) -> Result<usize> {
+        AsyncReadExt::read_exact(self, data)
+            .await
+            .map_err(Error::IO)
+    }
+    pub async fn seek(&mut self, seek_to: SeekFrom) -> Result<u64> {
+        AsyncSeekExt::seek(self, seek_to).await.map_err(Error::IO)
+    }
+    pub async fn stream_position(&mut self) -> Result<u64> {
+        AsyncSeekExt::stream_position(self).await.map_err(Error::IO)
+    }
+
+    // helpers
 
     async fn fill_buf(agent: mpsc::Sender<Command>, pos: u64) -> io::Result<Vec<u8>> {
         let (tx, rx) = oneshot::channel();
@@ -109,10 +164,18 @@ impl MohawkReader {
             return Poll::Ready(Ok(()));
         }
 
+        if self.remaining == Some(0) {
+            // no update to buffer == EOF
+            return Poll::Ready(Ok(()));
+        }
+
         let mut this = self.as_mut().project();
 
         if this.fill_buf.is_none() {
-            trace!("buffer empty, new request");
+            trace!(
+                "buffer empty, new request :: remaining={:?}",
+                this.remaining
+            );
             *this.fill_buf = Some(Box::pin(Self::fill_buf(this.agent.clone(), *this.pos)));
         }
 
@@ -120,8 +183,11 @@ impl MohawkReader {
         let got = ready!(fut.as_mut().poll(cx));
         *this.fill_buf = None;
 
-        Poll::Ready(got.map(|v| {
+        Poll::Ready(got.map(|mut v| {
             trace!("got buffer, keeping it");
+            if let Some(rem) = this.remaining {
+                v.truncate(*rem);
+            }
             *this.buffer = v;
         }))
     }
@@ -158,27 +224,32 @@ impl io::AsyncBufRead for MohawkReader {
 
         *this.buffer = this.buffer.split_off(amt);
         *this.pos += u64::try_from(amt).expect("not to add so much");
+        *this.remaining = this.remaining.map(|rem| rem - amt);
     }
 }
 
 // we don't actually send anything to the handler as seeking is done on every request
 impl io::AsyncSeek for MohawkReader {
     fn start_seek(mut self: Pin<&mut Self>, seek_to: SeekFrom) -> io::Result<()> {
+        let is_within_buffer = |cur| cur >= self.pos && cur - self.pos < self.buffer.len() as u64;
+
         match seek_to {
+            SeekFrom::Current(0) => {}
+            SeekFrom::Start(cur) if is_within_buffer(cur) => {
+                let skip = (cur - self.pos) as usize;
+                io::AsyncBufRead::consume(self.as_mut(), skip);
+            }
             SeekFrom::Start(cur) => {
-                let is_within_buffer = cur > self.pos && cur - self.pos < self.buffer.len() as u64;
-                if is_within_buffer {
-                    let skip = (cur - self.pos) as usize;
-                    io::AsyncBufRead::consume(self.as_mut(), skip)
-                } else {
-                    // clear state
-                    self.as_mut().fill_buf = None;
-                    self.as_mut().buffer = Vec::new();
-                }
+                self.as_mut().fill_buf = None;
+                self.as_mut().buffer = Vec::new();
 
                 self.pos = cur;
             }
-            _ => todo!("impl other seeks"),
+
+            SeekFrom::Current(off) if off >= 0 && is_within_buffer(self.pos + off as u64) => {
+                io::AsyncBufRead::consume(self.as_mut(), off as usize);
+            }
+            _ => todo!("impl other seeks: {:?}", seek_to),
         }
 
         Ok(())
@@ -194,6 +265,7 @@ impl Clone for MohawkReader {
         Self {
             agent: self.agent.clone(),
             pos: self.pos,
+            remaining: self.remaining,
 
             fill_buf: None,
             buffer: Vec::new(),
@@ -207,7 +279,7 @@ struct Handler {
 }
 
 impl Handler {
-    async fn open(path: impl AsRef<Path>) -> io::Result<Self> {
+    async fn open(path: impl AsRef<Path>) -> Result<Self> {
         Ok(Self {
             reader: fs::File::open(&path).await.map(io::BufReader::new)?,
             pos: 0,
@@ -262,3 +334,6 @@ impl Handler {
         tx
     }
 }
+
+#[cfg(test)]
+mod tests {}

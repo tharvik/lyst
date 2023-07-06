@@ -5,15 +5,39 @@ use std::{collections::HashMap, fmt::Write, io::SeekFrom, path::Path};
 use tracing::{trace, trace_span, warn};
 
 use async_stream::try_stream;
-use tokio::io::{self, AsyncReadExt, AsyncSeekExt};
 use tokio_stream::StreamExt;
-
-use crate::{errors::*, Result};
 
 mod reader;
 use reader::MohawkReader;
 
 use self::pict::PICT;
+
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+    #[error(transparent)]
+    Reader(#[from] reader::Error),
+
+    #[error("unexpected IFF signature")]
+    IFFSignature,
+    #[error("unexpected RSRC signature")]
+    RSRCSignature,
+    #[error("unsupported version: {0}")]
+    UnsupportedVersion(u16),
+    #[error("unsupported compaction: {0}")]
+    UnsupportedCompaction(u16),
+    #[error("uncoherent file size")]
+    UncoherentFileSize,
+    #[error("file id not found in table")]
+    UnknownFileID,
+    #[error("too big file table")]
+    TooBigFileTable,
+    #[error("uncoherent file table size")]
+    UncoherentFileTableSize,
+
+    #[error("parse pict: {0}")]
+    PICT(#[from] pict::Error),
+}
+pub type Result<T> = std::result::Result<T, Error>;
 
 pub struct Resource {
     pub name: Option<String>,
@@ -23,7 +47,7 @@ pub struct Resource {
 
 pub struct File {
     offset: u64,
-    pub size: u64,
+    pub size: u32,
     pub flag: u8,
     pub unknown: u16,
 }
@@ -36,7 +60,7 @@ impl Resource {
     }
 
     pub fn read(&self) -> MohawkReader {
-        self.reader.clone()
+        self.reader.take(self.file.size as usize)
     }
 }
 
@@ -187,9 +211,7 @@ impl Mohawk {
                         .map(|(resource_id, file_id, name)| {
                             Ok((
                                 resource_id,
-                                files
-                                    .remove(&file_id)
-                                    .ok_or(InvalidHeaderError::UnknownFileID)?,
+                                files.remove(&file_id).ok_or(Error::UnknownFileID)?,
                                 name,
                             ))
                         })
@@ -230,22 +252,24 @@ impl Mohawk {
 
     pub async fn get_pict(&self, id: &ResourceID) -> Option<Result<PICT>> {
         trace!("get pict");
+
         let res = self.types.get(&TypeID::PICT).and_then(|m| m.get(id))?;
-        Some(PICT::parse(res.read()).await)
+
+        Some(PICT::parse(res.read()).await.map_err(Error::PICT))
     }
 }
 
 /// parse IFF header and return total file size
 async fn parse_iff_header(reader: &mut MohawkReader) -> Result<u32> {
     if reader.read_4_bytes().await? != *b"MHWK" {
-        Err(InvalidHeaderError::IFFSignature)?;
+        Err(Error::IFFSignature)?;
     }
 
     reader
         .read_u32()
         .await
         .map(|size| size + 8)
-        .map_err(Error::IO)
+        .map_err(Error::Reader)
 }
 
 struct RSRCHeader {
@@ -257,18 +281,18 @@ struct RSRCHeader {
 /// parse RSRC header and return its content
 async fn parse_rsrc_header(reader: &mut MohawkReader, total_file_size: u32) -> Result<RSRCHeader> {
     if reader.read_4_bytes().await? != *b"RSRC" {
-        Err(InvalidHeaderError::RSRCSignature)?;
+        Err(Error::RSRCSignature)?;
     }
     let version = reader.read_u16().await?;
     if version != 0x100 {
-        Err(InvalidHeaderError::UnsupportedVersion(version))?;
+        Err(Error::UnsupportedVersion(version))?;
     }
     let compaction = reader.read_u16().await?;
     if compaction != 0x1 {
-        Err(InvalidHeaderError::UnsupportedCompaction(compaction))?;
+        Err(Error::UnsupportedCompaction(compaction))?;
     }
     if reader.read_u32().await? != total_file_size {
-        Err(InvalidHeaderError::UncoherentFileSize)?;
+        Err(Error::UncoherentFileSize)?;
     }
 
     Ok(RSRCHeader {
@@ -336,20 +360,21 @@ async fn parse_file_table(
         .read_u32()
         .await?
         .try_into()
-        .map_err(|_| InvalidHeaderError::TooBigFileTable)?;
+        .map_err(|_| Error::TooBigFileTable)?;
 
     const BYTES_PER_ENTRY: u16 = 4 + 4 + 2;
     if 4 + file_entry_count * BYTES_PER_ENTRY != expected_size {
-        Err(InvalidHeaderError::UncoherentFileTableSize)?
+        Err(Error::UncoherentFileTableSize)?
     }
 
     try_stream! {
         for file_id in 0..file_entry_count {
             let offset = reader.read_u32().await? as u64;
 
-            let size_and_flag = reader.read_u32().await?;
-            let size = (size_and_flag >> 8) as u64;
-            let flag = size_and_flag.to_be_bytes()[3];
+            let size_lower = reader.read_u16().await?;
+            let size_upper = reader.read_u8().await?;
+            let flag = reader.read_u8().await?;
+            let size = ((size_upper as u32) << 16) | size_lower as u32;
 
             let unknown = reader.read_u16().await?;
 
@@ -359,10 +384,10 @@ async fn parse_file_table(
             )
         }
     }
-    .collect::<io::Result<Vec<_>>>()
+    .collect::<reader::Result<Vec<_>>>()
     .await
     .map(|t| t.into_iter().collect())
-    .map_err(Error::IO)
+    .map_err(Error::Reader)
 }
 
 #[cfg(test)]

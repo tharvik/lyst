@@ -1,14 +1,20 @@
 use lyst::{
-    mohawk::{Resource, ResourceID, TypeID},
+    mohawk::{pict::PICT, Resource, ResourceID, TypeID},
     Mohawk,
 };
+use sdl2::image::LoadTexture;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     process::ExitCode,
     result,
+    time::Duration,
 };
-use tokio::io::{self, stdout};
+
+use tokio::{
+    io::{self, stdout},
+    task::spawn_blocking,
+};
 
 use clap::{Parser, Subcommand};
 
@@ -43,7 +49,8 @@ enum Commands {
 }
 
 mod errors {
-    use tokio::io;
+    use lyst::mohawk;
+    use tokio::{io, task};
 
     #[derive(thiserror::Error, Debug)]
     pub enum Error {
@@ -56,13 +63,13 @@ mod errors {
     #[derive(thiserror::Error, Debug)]
     pub enum ListError {
         #[error(transparent)]
-        Lyst(#[from] lyst::Error),
+        Mohawk(#[from] mohawk::Error),
     }
 
     #[derive(thiserror::Error, Debug)]
     pub enum ExtractError {
         #[error(transparent)]
-        Lyst(#[from] lyst::Error),
+        Mohawk(#[from] mohawk::Error),
 
         #[error("type not found")]
         TypeNotFound,
@@ -70,8 +77,12 @@ mod errors {
         ResourceNotFound,
         #[error("unsupported type")]
         UnsupportedType,
-        #[error("write extracted")]
+        #[error("write extracted: {0}")]
         WriteExtracted(io::Error),
+        #[error("setup pict show: {0}")]
+        SetupPictShow(task::JoinError),
+        #[error("show extracted picture: {0}")]
+        ShowPict(String),
     }
 }
 
@@ -115,6 +126,43 @@ async fn list(path: &Path) -> Result<(), errors::ListError> {
     Ok(())
 }
 
+fn show_pict(pict: PICT) -> Result<(), String> {
+    use sdl2::{event::Event, keyboard::Keycode, pixels::Color};
+
+    let sdl_context = sdl2::init()?;
+    let window = sdl_context
+        .video()?
+        .window("rust-sdl2 demo", 800, 600)
+        .build()
+        .unwrap();
+
+    let mut canvas = window.into_canvas().build().unwrap();
+
+    let texture_creator = canvas.texture_creator();
+    let texture = texture_creator.load_texture_bytes(pict.as_ref()).unwrap();
+
+    canvas.clear();
+    let mut event_pump = sdl_context.event_pump().unwrap();
+    'running: loop {
+        canvas.copy(&texture, None, None).unwrap();
+        canvas.present();
+        for event in event_pump.poll_iter() {
+            match event {
+                Event::Quit { .. }
+                | Event::KeyDown {
+                    keycode: Some(Keycode::Escape),
+                    ..
+                } => break 'running Ok(()),
+                _ => {}
+            }
+        }
+        // The rest of the game loop goes here...
+
+        canvas.present();
+        ::std::thread::sleep(Duration::new(0, 1_000_000_000u32 / 60));
+    }
+}
+
 async fn extract(
     path: impl AsRef<Path>,
     type_id: &TypeID,
@@ -122,7 +170,7 @@ async fn extract(
 ) -> Result<(), errors::ExtractError> {
     use errors::ExtractError::*;
 
-    let mohawk = Mohawk::open(path).await?;
+    let mohawk = crate::Mohawk::open(path).await?;
 
     match type_id {
         TypeID::MSND => {
@@ -139,10 +187,19 @@ async fn extract(
                 .map_err(WriteExtracted)?;
         }
         TypeID::PICT => {
-            mohawk
+            let pict = mohawk
                 .get_pict(resource_id)
                 .await
                 .ok_or(ResourceNotFound)??;
+
+            tokio::fs::write(format!("/tmp/{}.jpeg", resource_id), pict.as_ref()).await.unwrap();
+
+            /*
+            spawn_blocking(|| show_pict(pict))
+                .await
+                .map_err(SetupPictShow)?
+                .map_err(ShowPict)?;
+            */
         }
         _ => return Err(UnsupportedType),
     }
@@ -152,8 +209,7 @@ async fn extract(
 
 #[cfg(not(feature = "dep:console-subscriber"))]
 fn setup_tracing() {
-    tracing::subscriber::set_global_default(tracing_subscriber::FmtSubscriber::default())
-        .expect("setting default subscriber failed");
+    tracing_subscriber::fmt::init();
 }
 
 #[cfg(feature = "dep:console-subscriber")]
