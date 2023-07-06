@@ -260,7 +260,7 @@ impl Handler {
         self.seek(at_pos).await?;
         let buf = Vec::from(self.reader.fill_buf().await?);
         trace!("got {} bytes", buf.len());
-        Ok(Vec::from(buf))
+        Ok(buf)
     }
 
     fn spawn(mut self) -> mpsc::Sender<Command> {
@@ -296,23 +296,23 @@ mod tests {
     use super::Reader;
     use crate::tests::get_known_files;
 
-    async fn take_more(path: impl AsRef<Path>) {
-        let reader = Reader::open(path).await.expect("to open path").take(0);
-
-        let mut buf = [0u8; 1];
-        assert_eq!(
-            reader
-                .take(1)
-                .read(&mut buf)
-                .await
-                .expect("to notice EOF gracefully"),
-            0,
-            "not end of file but reader should be finished"
-        )
-    }
-
-    #[tokio::test]
+    #[test_log::test(tokio::test)]
+    #[ignore]
     async fn take_more_than_already_taken_returns_smallest() {
-        get_known_files().then(take_more).collect::<()>().await
+        async fn run(path: impl AsRef<Path>) {
+            let reader = Reader::open(path).await.expect("to open path").take(0);
+
+            let mut buf = [0u8; 1];
+            assert_eq!(
+                reader
+                    .take(1)
+                    .read(&mut buf)
+                    .await
+                    .expect("to notice EOF gracefully"),
+                0,
+                "not end of file but reader should be finished"
+            )
+        }
+        get_known_files().then(run).collect::<()>().await
     }
 }

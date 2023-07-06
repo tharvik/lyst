@@ -31,7 +31,8 @@ tracing-subscriber = "0.3"
 
 [dev-dependencies]
 console-subscriber = { version = "0.1" }
-criterion = { version = "0.4", features = ["async_tokio", "html_reports"] }
+criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
+test-log = { version = "0.2", default-features = false, features = ["trace"] }
 tokio = { version = "1", features = ["tracing"] }
 
 [[bench]]

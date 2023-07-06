@@ -99,6 +99,8 @@ struct ImageDescription {
     color_table_id: u16,
 }
 impl ImageDescription {
+    const RAW_SIZE: usize = 86;
+
     async fn parse(reader: &mut Reader) -> Result<Self> {
         let struct_size = reader.read_u32().await?;
         if struct_size != 86 {
@@ -154,7 +156,7 @@ impl ImageDescription {
 #[derive(PartialEq, Eq, Debug, FromRepr, strum::Display)]
 #[repr(u16)]
 enum Opcode {
-    NOP = 0x0000,
+    Nop = 0x0000,
     Clip = 0x0001,
     TxFont = 0x0003,
     TxFace = 0x0004,
@@ -164,6 +166,7 @@ enum Opcode {
     VersionOp = 0x0011,
     DefHilite = 0x001E,
     LongText = 0x0028,
+    LongComment = 0x00A1,
     OpEndPic = 0x00FF,
     Version = 0x02FF,
     HeaderOp = 0x0C00,
@@ -172,7 +175,7 @@ enum Opcode {
 
 #[allow(dead_code)]
 enum Operation {
-    NOP,
+    Nop,
     Clip {
         size: u16,
         bounding: Rectangle,
@@ -189,7 +192,10 @@ enum Operation {
     DefHilite,
     LongText {
         location: Point,
-        // count: u8
+        text: String,
+    },
+    LongComment {
+        kind: i16,
         text: String,
     },
     OpEndPic,
@@ -214,7 +220,7 @@ enum Operation {
 impl Operation {
     const fn opcode(&self) -> Opcode {
         match self {
-            Self::NOP => Opcode::NOP,
+            Self::Nop => Opcode::Nop,
             Self::Clip { .. } => Opcode::Clip,
             Self::PnSize(_) => Opcode::PnSize,
             Self::TxFont(_) => Opcode::TxFont,
@@ -224,6 +230,7 @@ impl Operation {
             Self::TxRatio { .. } => Opcode::TxRatio,
             Self::DefHilite => Opcode::DefHilite,
             Self::LongText { .. } => Opcode::LongText,
+            Self::LongComment { .. } => Opcode::LongComment,
             Self::OpEndPic => Opcode::OpEndPic,
             Self::Version => Opcode::Version,
             Self::HeaderOp { .. } => Opcode::HeaderOp,
@@ -262,7 +269,7 @@ impl Operation {
         let opcode = Opcode::from_repr(raw).ok_or(Error::UnsupportedOpcode(raw))?;
 
         let op = match opcode {
-            Opcode::NOP => Self::NOP,
+            Opcode::Nop => Self::Nop,
             Opcode::Clip => Self::Clip {
                 size: reader.read_u16().await?,
                 bounding: Rectangle::parse(reader).await?,
@@ -290,7 +297,6 @@ impl Operation {
 
                 let mut raw = vec![0u8; count as usize];
                 reader.read_exact(&mut raw).await?;
-                encoding_rs::Encoding::for_bom(&raw).unwrap();
                 let text = WINDOWS_1252
                     .decode_without_bom_handling_and_without_replacement(&raw)
                     .ok_or(Error::InvalidCP1252Format)?;
@@ -303,6 +309,21 @@ impl Operation {
 
                 Self::LongText {
                     location,
+                    text: text.into_owned(),
+                }
+            }
+            Opcode::LongComment => {
+                let kind = reader.read_i16().await?;
+                let size = reader.read_u16().await?;
+
+                let mut raw = vec![0u8; size as usize];
+                reader.read_exact(&mut raw).await?;
+                let text = WINDOWS_1252
+                    .decode_without_bom_handling_and_without_replacement(&raw)
+                    .ok_or(Error::InvalidCP1252Format)?;
+
+                Operation::LongComment {
+                    kind,
                     text: text.into_owned(),
                 }
             }
@@ -325,6 +346,10 @@ impl Operation {
                 // https://web.archive.org/web/20030827061809/http://developer.apple.com/documentation/QuickTime/INMAC/QT/iqImageCompMgr.a.htm
 
                 let size = reader.read_u32().await?;
+                if size % 2 != 0 {
+                    panic!("uneven size so padding is wrong")
+                }
+
                 let version = reader.read_u16().await?;
                 let transformation = Matrix::parse(reader).await?;
                 let matte_size = reader.read_u32().await?;
@@ -351,7 +376,13 @@ impl Operation {
                 let mut data = vec![0; img_desc.data_size as usize];
                 reader.read_exact(&mut data).await?;
 
-                if size % 2 == 1 {
+                // img_desc.data_size might not run to the end of the opcode
+                let diff =
+                    size as usize - img_desc.data_size as usize - 68 - ImageDescription::RAW_SIZE;
+                if diff > 1 {
+                    panic!("too much padding")
+                }
+                if diff != 0 {
                     skip_filler(reader).await?;
                 }
 
@@ -403,9 +434,7 @@ impl PICT {
         Ok(op)
     }
 
-    fn read_operations(
-        mut reader: Reader,
-    ) -> impl Stream<Item = Result<Operation>> + Unpin {
+    fn read_operations(mut reader: Reader) -> impl Stream<Item = Result<Operation>> + Unpin {
         Box::pin(try_stream! {
             loop {
                 let op = Operation::parse(&mut reader).await?;
@@ -451,7 +480,7 @@ impl PICT {
             trace!("exec op: {}", op);
 
             match op {
-                Operation::NOP => {}
+                Operation::Nop => {}
                 Operation::DefHilite
                 | Operation::Clip { .. }
                 | Operation::TxFont(_)
@@ -459,7 +488,8 @@ impl PICT {
                 | Operation::PnSize(_)
                 | Operation::TxSize(_)
                 | Operation::TxRatio { .. }
-                | Operation::LongText { .. } => {} // TODO?
+                | Operation::LongText { .. }
+                | Operation::LongComment { .. } => {} // TODO?
                 Operation::CompressedQuickTime { data, .. } => {
                     if raw.is_some() {
                         panic!("already got an image")

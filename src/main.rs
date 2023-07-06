@@ -23,14 +23,14 @@ fn is_4_chars(arg: &str) -> result::Result<TypeID, String> {
         .bytes()
         .collect::<Vec<_>>()
         .try_into()
-        .map_err(|_| format!("not 4 ASCII char"))?;
+        .map_err(|_| "not 4 ASCII char".to_string())?;
 
     Ok(TypeID::from(raw))
 }
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
-struct CLI {
+struct Interface {
     #[command(subcommand)]
     command: Commands,
 }
@@ -217,7 +217,7 @@ fn setup_tracing() {
 async fn main() -> ExitCode {
     setup_tracing();
 
-    let cli = CLI::parse();
+    let cli = Interface::parse();
 
     let ret: Result<(), errors::Error> = match &cli.command {
         Commands::List { path } => list(path).await.map_err(errors::Error::List),

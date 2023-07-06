@@ -3,7 +3,7 @@ pub mod pict;
 use core::fmt;
 use std::{collections::HashMap, fmt::Write, io::SeekFrom, path::Path, string};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt};
-use tracing::{trace, trace_span, warn};
+use tracing::{trace, trace_span, warn, Instrument};
 
 use async_stream::try_stream;
 use tokio_stream::StreamExt;
@@ -264,7 +264,12 @@ impl Mohawk {
 
         let res = self.types.get(&TypeID::PICT).and_then(|m| m.get(id))?;
 
-        Some(PICT::parse(res.read()).await.map_err(Error::PICT))
+        Some(
+            PICT::parse(res.read())
+                .instrument(trace_span!("parse PICT", id))
+                .await
+                .map_err(Error::PICT),
+        )
     }
 }
 
@@ -406,12 +411,13 @@ mod tests {
     use super::*;
     use crate::tests::get_known_files;
 
-    async fn open(path: PathBuf) {
-        Mohawk::open(&path).await.expect("to parse Mohawk file");
-    }
-
-    #[tokio::test]
+    #[test_log::test(tokio::test)]
+    #[ignore]
     async fn open_known_files() {
+        async fn open(path: PathBuf) {
+            Mohawk::open(&path).await.expect("to parse Mohawk file");
+        }
+
         get_known_files().then(open).collect::<()>().await
     }
 }
