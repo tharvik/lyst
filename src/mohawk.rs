@@ -1,14 +1,15 @@
 pub mod pict;
 
 use core::fmt;
-use std::{collections::HashMap, fmt::Write, io::SeekFrom, path::Path};
+use std::{collections::HashMap, fmt::Write, io::SeekFrom, path::Path, string};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt};
 use tracing::{trace, trace_span, warn};
 
 use async_stream::try_stream;
 use tokio_stream::StreamExt;
 
 mod reader;
-use reader::MohawkReader;
+use reader::Reader;
 
 use self::pict::PICT;
 
@@ -33,6 +34,8 @@ pub enum Error {
     TooBigFileTable,
     #[error("uncoherent file table size")]
     UncoherentFileTableSize,
+    #[error("unable to parse as UTF-8: {0}")]
+    InvalidUTF8Format(#[from] string::FromUtf8Error),
 
     #[error("parse pict: {0}")]
     PICT(#[from] pict::Error),
@@ -42,7 +45,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct Resource {
     pub name: Option<String>,
     pub file: File,
-    reader: MohawkReader,
+    reader: Reader,
 }
 
 pub struct File {
@@ -53,14 +56,14 @@ pub struct File {
 }
 
 impl Resource {
-    pub async fn new(name: Option<String>, file: File, mut reader: MohawkReader) -> Result<Self> {
+    pub async fn new(name: Option<String>, file: File, mut reader: Reader) -> Result<Self> {
         reader.seek(SeekFrom::Start(file.offset)).await?;
 
         Ok(Self { name, file, reader })
     }
 
-    pub fn read(&self) -> MohawkReader {
-        self.reader.take(self.file.size as usize)
+    pub fn read(&self) -> Reader {
+        Reader::take(&self.reader, self.file.size as usize)
     }
 }
 
@@ -110,7 +113,7 @@ impl Mohawk {
     pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
         let _span_ = trace_span!("open", "path={}", path.as_ref().display()).entered();
 
-        let mut reader = MohawkReader::open(path).await?;
+        let mut reader = Reader::open(path).await?;
 
         let total_file_size = parse_iff_header(&mut reader).await?;
         trace!(total_file_size, "iff parsed");
@@ -175,7 +178,13 @@ impl Mohawk {
                                     + name_offset_in_name_list as u64,
                             ))
                             .await?;
-                        let name = reader.read_string().await?;
+
+                        let mut c_string = vec![];
+                        reader.read_until(0u8, &mut c_string).await?;
+                        c_string.remove(c_string.len() - 1);
+
+                        let name = String::from_utf8(c_string)?;
+
                         yield (resource_id, name)
                     }
                 }
@@ -260,7 +269,7 @@ impl Mohawk {
 }
 
 /// parse IFF header and return total file size
-async fn parse_iff_header(reader: &mut MohawkReader) -> Result<u32> {
+async fn parse_iff_header(reader: &mut Reader) -> Result<u32> {
     if reader.read_4_bytes().await? != *b"MHWK" {
         Err(Error::IFFSignature)?;
     }
@@ -279,7 +288,7 @@ struct RSRCHeader {
 }
 
 /// parse RSRC header and return its content
-async fn parse_rsrc_header(reader: &mut MohawkReader, total_file_size: u32) -> Result<RSRCHeader> {
+async fn parse_rsrc_header(reader: &mut Reader, total_file_size: u32) -> Result<RSRCHeader> {
     if reader.read_4_bytes().await? != *b"RSRC" {
         Err(Error::RSRCSignature)?;
     }
@@ -307,7 +316,7 @@ struct TypeTableEntry {
     name_table_offset_in_resource_dir: u16,
 }
 
-async fn parse_type_table(reader: &mut MohawkReader) -> Result<Vec<(TypeID, TypeTableEntry)>> {
+async fn parse_type_table(reader: &mut Reader) -> Result<Vec<(TypeID, TypeTableEntry)>> {
     let type_entry_count = reader.read_u16().await?;
     try_stream! {
         for _ in 0..type_entry_count {
@@ -324,7 +333,7 @@ async fn parse_type_table(reader: &mut MohawkReader) -> Result<Vec<(TypeID, Type
     .await
 }
 
-async fn parse_name_table(reader: &mut MohawkReader) -> Result<Vec<(ResourceID, u16)>> {
+async fn parse_name_table(reader: &mut Reader) -> Result<Vec<(ResourceID, u16)>> {
     let names_count = reader.read_u16().await?;
 
     try_stream! {
@@ -340,7 +349,7 @@ async fn parse_name_table(reader: &mut MohawkReader) -> Result<Vec<(ResourceID, 
 }
 
 /// parse the resource table, making a mapping from ResourceID to file table index
-async fn parse_resource_table(reader: &mut MohawkReader) -> Result<Vec<(ResourceID, u16)>> {
+async fn parse_resource_table(reader: &mut Reader) -> Result<Vec<(ResourceID, u16)>> {
     let resource_entry_count = reader.read_u16().await?;
 
     try_stream! {
@@ -353,7 +362,7 @@ async fn parse_resource_table(reader: &mut MohawkReader) -> Result<Vec<(Resource
 }
 
 async fn parse_file_table(
-    reader: &mut MohawkReader,
+    reader: &mut Reader,
     expected_size: u16,
 ) -> Result<HashMap<FileID, File>> {
     let file_entry_count: u16 = reader

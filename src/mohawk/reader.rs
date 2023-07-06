@@ -4,9 +4,7 @@ use std::{
     io::SeekFrom,
     path::Path,
     pin::{pin, Pin},
-    string,
     task::{ready, Context, Poll},
-    vec,
 };
 use tracing::{trace, trace_span, warn, Instrument};
 
@@ -16,13 +14,7 @@ use tokio::{
     sync::{mpsc, oneshot},
 };
 
-#[derive(thiserror::Error, Debug)]
-pub enum Error {
-    #[error("parse string: {0}")]
-    UTF8(#[from] string::FromUtf8Error),
-    #[error(transparent)]
-    IO(#[from] io::Error),
-}
+pub type Error = io::Error;
 pub type Result<T> = std::result::Result<T, Error>;
 
 struct Command {
@@ -53,7 +45,7 @@ impl fmt::Display for Commands {
 type BoxedFuture<T> = Pin<Box<dyn Future<Output = T>>>;
 
 #[pin_project::pin_project]
-pub struct MohawkReader {
+pub struct Reader {
     agent: mpsc::Sender<Command>,
     pos: u64,
     remaining: Option<usize>,
@@ -63,7 +55,7 @@ pub struct MohawkReader {
     buffer: Vec<u8>,
 }
 
-impl MohawkReader {
+impl Reader {
     // Open the given file
     pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
         trace!("open {}", path.as_ref().display());
@@ -78,7 +70,7 @@ impl MohawkReader {
         })
     }
 
-    // New reader reading at most the given number of bytes
+    // differ from AsyncReadExt by cloning as needed
     pub fn take(&self, size: usize) -> Self {
         trace!("take {}", size);
 
@@ -92,52 +84,11 @@ impl MohawkReader {
         }
     }
 
-    /// Read a NULL-terminated string
-    pub async fn read_string(&mut self) -> Result<String> {
-        let mut c_string = vec![];
-        self.read_until(0u8, &mut c_string).await?;
-        c_string.remove(c_string.len() - 1);
-
-        Ok(String::from_utf8(c_string)?)
-    }
-
     pub async fn read_4_bytes(&mut self) -> Result<[u8; 4]> {
         let mut buffer = [0u8; 4];
         self.read_exact(&mut buffer).await?;
 
         Ok(buffer)
-    }
-
-    // forward to have our Result
-
-    pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        AsyncReadExt::read(self, buf).await.map_err(Error::IO)
-    }
-    pub async fn read_u8(&mut self) -> Result<u8> {
-        AsyncReadExt::read_u8(self).await.map_err(Error::IO)
-    }
-    pub async fn read_u16(&mut self) -> Result<u16> {
-        AsyncReadExt::read_u16(self).await.map_err(Error::IO)
-    }
-    pub async fn read_i16(&mut self) -> Result<i16> {
-        AsyncReadExt::read_i16(self).await.map_err(Error::IO)
-    }
-    pub async fn read_u32(&mut self) -> Result<u32> {
-        AsyncReadExt::read_u32(self).await.map_err(Error::IO)
-    }
-    pub async fn read_u64(&mut self) -> Result<u64> {
-        AsyncReadExt::read_u64(self).await.map_err(Error::IO)
-    }
-    pub async fn read_exact(&mut self, data: &mut [u8]) -> Result<usize> {
-        AsyncReadExt::read_exact(self, data)
-            .await
-            .map_err(Error::IO)
-    }
-    pub async fn seek(&mut self, seek_to: SeekFrom) -> Result<u64> {
-        AsyncSeekExt::seek(self, seek_to).await.map_err(Error::IO)
-    }
-    pub async fn stream_position(&mut self) -> Result<u64> {
-        AsyncSeekExt::stream_position(self).await.map_err(Error::IO)
     }
 
     // helpers
@@ -193,7 +144,7 @@ impl MohawkReader {
     }
 }
 
-impl io::AsyncRead for MohawkReader {
+impl io::AsyncRead for Reader {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -209,7 +160,7 @@ impl io::AsyncRead for MohawkReader {
     }
 }
 
-impl io::AsyncBufRead for MohawkReader {
+impl io::AsyncBufRead for Reader {
     fn poll_fill_buf(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
         let _span_ = trace_span!("fill buf").entered();
 
@@ -229,7 +180,7 @@ impl io::AsyncBufRead for MohawkReader {
 }
 
 // we don't actually send anything to the handler as seeking is done on every request
-impl io::AsyncSeek for MohawkReader {
+impl io::AsyncSeek for Reader {
     fn start_seek(mut self: Pin<&mut Self>, seek_to: SeekFrom) -> io::Result<()> {
         let is_within_buffer = |cur| cur >= self.pos && cur - self.pos < self.buffer.len() as u64;
 
@@ -260,7 +211,7 @@ impl io::AsyncSeek for MohawkReader {
     }
 }
 
-impl Clone for MohawkReader {
+impl Clone for Reader {
     fn clone(&self) -> Self {
         Self {
             agent: self.agent.clone(),
@@ -339,16 +290,14 @@ impl Handler {
 mod tests {
     use std::path::Path;
 
+    use tokio::io::AsyncReadExt;
     use tokio_stream::StreamExt;
 
-    use super::MohawkReader;
+    use super::Reader;
     use crate::tests::get_known_files;
 
     async fn take_more(path: impl AsRef<Path>) {
-        let reader = MohawkReader::open(path)
-            .await
-            .expect("to open path")
-            .take(0);
+        let reader = Reader::open(path).await.expect("to open path").take(0);
 
         let mut buf = [0u8; 1];
         assert_eq!(

@@ -127,7 +127,7 @@ async fn list(path: &Path) -> Result<(), errors::ListError> {
 }
 
 fn show_pict(pict: PICT) -> Result<(), String> {
-    use sdl2::{event::Event, keyboard::Keycode, pixels::Color};
+    use sdl2::{event::Event, keyboard::Keycode};
 
     let sdl_context = sdl2::init()?;
     let window = sdl_context
@@ -192,14 +192,10 @@ async fn extract(
                 .await
                 .ok_or(ResourceNotFound)??;
 
-            tokio::fs::write(format!("/tmp/{}.jpeg", resource_id), pict.as_ref()).await.unwrap();
-
-            /*
             spawn_blocking(|| show_pict(pict))
                 .await
                 .map_err(SetupPictShow)?
                 .map_err(ShowPict)?;
-            */
         }
         _ => return Err(UnsupportedType),
     }

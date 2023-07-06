@@ -1,14 +1,14 @@
-use std::{borrow::Cow, fmt};
+use std::{fmt, string};
 
 use async_stream::try_stream;
-use tokio::io;
+use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncSeekExt};
 use tokio_stream::{Stream, StreamExt};
 use tracing::{trace, warn};
 
 use encoding_rs::WINDOWS_1252;
 use strum::FromRepr;
 
-use super::reader::{self, MohawkReader};
+use super::reader::{self, Reader};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -25,8 +25,10 @@ pub enum Error {
     UnsupportedOpcode(u16),
     #[error("unexpected opcode {0:04x}")]
     UnexpectedOpcode(u16),
-    #[error("unable to read bytes as CP-1252")]
-    InvalidStringFormat,
+    #[error("unable to parse as CP-1252")]
+    InvalidCP1252Format,
+    #[error("unable to parse as UTF-8: {0}")]
+    InvalidUTF8Format(#[from] string::FromUtf8Error),
     #[error("end of picture found but reader is not empty")]
     DataRemaining,
 }
@@ -41,18 +43,19 @@ pub struct PICT(Vec<u8>);
 struct Point(u16, u16);
 
 impl Point {
-    async fn parse(reader: &mut MohawkReader) -> Result<Self> {
+    async fn parse(reader: &mut (impl AsyncRead + Unpin)) -> Result<Self> {
         Ok(Self(reader.read_u16().await?, reader.read_u16().await?))
     }
 }
 
+#[allow(dead_code)]
 struct Rectangle {
     top_left: Point,
     bottom_right: Point,
 }
 
 impl Rectangle {
-    async fn parse(reader: &mut MohawkReader) -> Result<Self> {
+    async fn parse(reader: &mut (impl AsyncReadExt + Unpin)) -> Result<Self> {
         Ok(Self {
             top_left: Point::parse(reader).await?,
             bottom_right: Point::parse(reader).await?,
@@ -63,7 +66,7 @@ impl Rectangle {
 // for CompressedQuickTime
 struct Matrix([[u32; 3]; 3]);
 impl Matrix {
-    async fn parse(reader: &mut MohawkReader) -> Result<Self> {
+    async fn parse(reader: &mut (impl AsyncReadExt + Unpin)) -> Result<Self> {
         let mut matrix = [[0u32; 3]; 3];
 
         for line in matrix.iter_mut() {
@@ -77,6 +80,7 @@ impl Matrix {
 }
 
 // for CompressedQuickTime
+#[allow(dead_code)]
 struct ImageDescription {
     compressor_type: [u8; 4],
     version: u16,
@@ -95,7 +99,7 @@ struct ImageDescription {
     color_table_id: u16,
 }
 impl ImageDescription {
-    async fn parse(reader: &mut MohawkReader) -> Result<Self> {
+    async fn parse(reader: &mut Reader) -> Result<Self> {
         let struct_size = reader.read_u32().await?;
         if struct_size != 86 {
             panic!("unexpected struct size: {}", struct_size)
@@ -122,7 +126,7 @@ impl ImageDescription {
         if rem.into_iter().any(|c| c != 0) {
             warn!("got data after string's end")
         }
-        let name = String::from_utf8(raw).map_err(reader::Error::UTF8)?;
+        let name = String::from_utf8(raw)?;
 
         let depth = reader.read_u16().await?;
         let color_table_id = reader.read_u16().await?;
@@ -166,6 +170,7 @@ enum Opcode {
     CompressedQuickTime = 0x8200,
 }
 
+#[allow(dead_code)]
 enum Operation {
     NOP,
     Clip {
@@ -227,7 +232,7 @@ impl Operation {
     }
 }
 
-async fn skip_filler(reader: &mut MohawkReader) -> Result<()> {
+async fn skip_filler(reader: &mut (impl AsyncReadExt + Unpin)) -> Result<()> {
     let fill = reader.read_u8().await?;
     if fill != 0 {
         panic!("invalid filler: {}", fill)
@@ -236,7 +241,7 @@ async fn skip_filler(reader: &mut MohawkReader) -> Result<()> {
     Ok(())
 }
 
-async fn skip_reserved<const N: usize>(reader: &mut MohawkReader) -> Result<()> {
+async fn skip_reserved<const N: usize>(reader: &mut (impl AsyncRead + Unpin)) -> Result<()> {
     // TODO iff not debug => consume
 
     let mut buf = [0u8; N];
@@ -250,7 +255,7 @@ async fn skip_reserved<const N: usize>(reader: &mut MohawkReader) -> Result<()> 
 }
 
 impl Operation {
-    async fn parse(reader: &mut MohawkReader) -> Result<Self> {
+    async fn parse(reader: &mut Reader) -> Result<Self> {
         let pos = reader.stream_position().await?;
 
         let raw = reader.read_u16().await?;
@@ -288,7 +293,7 @@ impl Operation {
                 encoding_rs::Encoding::for_bom(&raw).unwrap();
                 let text = WINDOWS_1252
                     .decode_without_bom_handling_and_without_replacement(&raw)
-                    .ok_or(Error::InvalidStringFormat)?;
+                    .ok_or(Error::InvalidCP1252Format)?;
 
                 if count % 2 == 0
                 // count is a byte so we start at odd bytes
@@ -389,7 +394,6 @@ impl PICT {
             .next()
             .await
             .ok_or(io::Error::from(io::ErrorKind::UnexpectedEof))
-            .map_err(reader::Error::IO)
             .map_err(Error::Reader)??; // behave as failing read
 
         if op.opcode() != expected {
@@ -399,7 +403,9 @@ impl PICT {
         Ok(op)
     }
 
-    fn read_operations(mut reader: MohawkReader) -> impl Stream<Item = Result<Operation>> + Unpin {
+    fn read_operations(
+        mut reader: Reader,
+    ) -> impl Stream<Item = Result<Operation>> + Unpin {
         Box::pin(try_stream! {
             loop {
                 let op = Operation::parse(&mut reader).await?;
@@ -415,7 +421,7 @@ impl PICT {
         })
     }
 
-    pub async fn parse(mut reader: MohawkReader) -> Result<PICT> {
+    pub async fn parse(mut reader: Reader) -> Result<PICT> {
         use Error::*;
 
         let mut empty_header = [0u8; 512];
@@ -424,8 +430,8 @@ impl PICT {
             return Err(NonEmptyHeader);
         }
 
-        let size = reader.read_u16().await?;
-        let bounding_rect = Rectangle::parse(&mut reader).await;
+        let _size = reader.read_u16().await?;
+        let _bounding_rect = Rectangle::parse(&mut reader).await;
 
         let mut opcodes = Self::read_operations(reader);
 
