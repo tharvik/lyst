@@ -3,6 +3,7 @@ name = "lyst"
 version = "0.1.0"
 authors = ["tharvik <tharvik@users.noreply.github.com>"]
 edition = "2021"
+license = "AGPL-3.0-only"
 
 [dependencies]
 async-stream = "0.3"
