@@ -1,5 +1,3 @@
-pub mod pict;
-
 use core::fmt;
 use std::{collections::HashMap, fmt::Write, io::SeekFrom, path::Path, string};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt};
@@ -10,8 +8,6 @@ use tokio_stream::StreamExt;
 
 mod reader;
 use reader::Reader;
-
-use self::pict::PICT;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -38,7 +34,7 @@ pub enum Error {
     InvalidUTF8Format(#[from] string::FromUtf8Error),
 
     #[error("parse pict: {0}")]
-    PICT(#[from] pict::Error),
+    PICT(#[from] pict_decoder::Error),
 }
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -259,13 +255,13 @@ impl Mohawk {
         Ok(Self { types })
     }
 
-    pub async fn get_pict(&self, id: &ResourceID) -> Option<Result<PICT>> {
+    pub async fn get_pict(&self, id: &ResourceID) -> Option<Result<pict_decoder::PICT>> {
         trace!("get pict");
 
         let res = self.types.get(&TypeID::PICT).and_then(|m| m.get(id))?;
 
         Some(
-            PICT::parse(res.read())
+            pict_decoder::PICT::parse(res.read())
                 .instrument(trace_span!("parse PICT", id))
                 .await
                 .map_err(Error::PICT),

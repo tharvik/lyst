@@ -786,6 +786,7 @@ dependencies = [
  "console-subscriber",
  "criterion",
  "encoding_rs",
+ "pict-decoder",
  "pin-project",
  "sdl2",
  "strum",
@@ -930,6 +931,22 @@ name = "percent-encoding"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b2a4787296e9989611394c33f193f676704af1686e70b8f8033ab5ba9a35a94"
+
+[[package]]
+name = "pict-decoder"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "criterion",
+ "encoding_rs",
+ "strum",
+ "test-log",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "pin-project"

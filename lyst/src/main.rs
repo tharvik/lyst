@@ -1,5 +1,5 @@
 use lyst::{
-    mohawk::{pict::PICT, Resource, ResourceID, TypeID},
+    mohawk::{Resource, ResourceID, TypeID},
     Mohawk,
 };
 use sdl2::image::LoadTexture;
@@ -126,7 +126,7 @@ async fn list(path: &Path) -> Result<(), errors::ListError> {
     Ok(())
 }
 
-fn show_pict(pict: PICT) -> Result<(), String> {
+fn show_pict(pict: pict_decoder::PICT) -> Result<(), String> {
     use sdl2::{event::Event, keyboard::Keycode};
 
     let sdl_context = sdl2::init()?;
