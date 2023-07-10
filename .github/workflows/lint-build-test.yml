@@ -3,21 +3,24 @@ on: [push, pull_request]
 name: lint, build, test
 
 jobs:
-  check:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-        name: git checkout
 
       - uses: actions-rs/toolchain@v1
-        name: install toolchain
         with:
-          profile: minimal
           toolchain: stable
+          profile: minimal
+          components: rustfmt, clippy
 
-      - run: sudo apt install libsdl2-dev libsdl2-{image,mixer}-dev
+      - uses: swatinem/rust-cache@v2
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions-rs/cargo@v1
+        name: cargo fmt
+        with:
+          command: fmt
+          args: --check
 
       - uses: actions-rs/cargo@v1
         name: cargo check
@@ -52,18 +55,15 @@ jobs:
           args: --all-features
 
   deny:
-    name: cargo deny
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v3
-        name: git checkout
 
       - uses: actions-rs/toolchain@v1
-        name: install toolchain
         with:
-          profile: minimal
           toolchain: stable
+          profile: minimal
 
       - uses: Swatinem/rust-cache@v2
 
