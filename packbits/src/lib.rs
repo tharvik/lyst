@@ -6,8 +6,10 @@ pub use encode::Encoder;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("literal not fully available")]
+    #[error("unfinished literal")]
     DanglingLiteral,
+    #[error("unfinished repeated")]
+    DanglingRepeated,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

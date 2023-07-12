@@ -72,7 +72,7 @@ impl Decoder {
     pub fn finalize(&mut self) -> Result<()> {
         match &mut self.0 {
             State::Idle => Ok(()),
-            State::Repeat { .. } => panic!("already handled by decode"),
+            State::Repeat { .. } => Err(Error::DanglingRepeated),
             State::Literal { .. } => Err(Error::DanglingLiteral),
         }
     }
