@@ -8,8 +8,15 @@ const MAX_LITERAL: usize = 128;
 
 #[derive(Debug)]
 enum State {
+    Idle,
     Literal(BytesMut),
     Repeat { byte: u8, count: usize },
+}
+
+impl State {
+    fn new_literal_buf() -> BytesMut {
+        BytesMut::with_capacity(MAX_LITERAL)
+    }
 }
 
 /// Encoder for the PackBits algorithm
@@ -46,7 +53,7 @@ fn ends_with_same_byte(slice: &[u8]) -> usize {
 impl Encoder {
     /// New Encoder writing result to given [`BufMut`]
     pub fn new() -> Self {
-        Self(State::Literal(BytesMut::with_capacity(MAX_LITERAL)))
+        Self(State::Idle)
     }
 
     /// Encode a chunk of data
@@ -64,6 +71,11 @@ impl Encoder {
             let byte = input.get_u8();
 
             match &mut self.0 {
+                State::Idle => {
+                    let mut buf = State::new_literal_buf();
+                    buf.put_u8(byte);
+                    self.0 = State::Literal(buf)
+                }
                 State::Literal(ref mut buf) if buf.len() == MAX_LITERAL => {
                     output_literal(output, buf);
                     buf.clear();
@@ -88,7 +100,7 @@ impl Encoder {
                 State::Repeat { byte: value, count } if *count == MAX_REPEATED => {
                     output_repeating(output, *value, *count);
 
-                    let mut buf = BytesMut::with_capacity(MAX_LITERAL);
+                    let mut buf = State::new_literal_buf();
                     buf.put_u8(byte);
                     self.0 = State::Literal(buf)
                 }
@@ -97,7 +109,7 @@ impl Encoder {
                         *count += 1
                     } else {
                         output_repeating(output, *value, *count);
-                        let mut buf = BytesMut::with_capacity(MAX_LITERAL);
+                        let mut buf = State::new_literal_buf();
                         buf.put_u8(byte);
 
                         self.0 = State::Literal(buf)
@@ -116,6 +128,7 @@ impl Encoder {
 
     pub fn finalize_on(&mut self, output: &mut impl BufMut) {
         match &mut self.0 {
+            State::Idle => {}
             State::Literal(ref mut buf) => output_literal(output, buf),
             State::Repeat { byte: value, count } => output_repeating(output, *value, *count),
         }
@@ -184,5 +197,10 @@ mod tests {
                 0xAA,
             ],
         )
+    }
+
+    #[test]
+    fn empty() {
+        test_encode_to(&[], &[])
     }
 }
