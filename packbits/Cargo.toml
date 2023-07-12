@@ -1,0 +1,17 @@
+[package]
+name = "packbits"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0"
+authors = ["tharvik"]
+
+[dependencies]
+bytes = "1"
+thiserror = "1"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "roundtrip"
+harness = false

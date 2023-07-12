@@ -1,2 +1,2 @@
 [workspace]
-members = ["lyst", "pict-decoder"]
+members = ["lyst", "packbits", "pict-decoder"]
