@@ -3,7 +3,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use strum::FromRepr;
 use tracing::warn;
 
-use crate::{rectangle::Rectangle, Result};
+use crate::{rectangle::Rectangle, utils::skip_reserved, Result};
 
 #[derive(FromRepr)]
 #[repr(u16)]
@@ -14,13 +14,13 @@ enum PixelType {
 
 #[allow(dead_code)]
 pub(crate) struct PixMap {
-    base_addr: u32,
+    pub(crate) base_addr: u32,
     pub(crate) row_bytes: u16,
     pointed_is_pixmap_record: bool,
     pub(crate) bounds: Rectangle,
     version: u16,
     pub(crate) pack_type: u16,
-    pack_size: u32,
+    pub(crate) pack_size: u32,
     horizontal_resolution: u32,
     vertical_resolution: u32,
     pixel_type: PixelType,
@@ -75,6 +75,7 @@ impl PixMap {
         let components_size = reader.read_u16().await?;
         let plane_offset = reader.read_u32().await?;
         let color_table_addr = reader.read_u32().await?;
+        skip_reserved::<4>(reader).await?;
 
         Ok(Self {
             base_addr,

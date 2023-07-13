@@ -785,7 +785,6 @@ dependencies = [
  "clap",
  "console-subscriber",
  "criterion",
- "encoding_rs",
  "pict-decoder",
  "pin-project",
  "sdl2",
@@ -946,8 +945,10 @@ name = "pict-decoder"
 version = "0.1.0"
 dependencies = [
  "async-stream",
+ "bytes",
  "criterion",
  "encoding_rs",
+ "packbits",
  "strum",
  "test-log",
  "thiserror",

@@ -1,5 +1,6 @@
-use std::fmt;
+use std::{fmt, vec};
 
+use bytes::Buf;
 use encoding_rs::WINDOWS_1252;
 use strum::FromRepr;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
@@ -159,25 +160,75 @@ impl Operation {
             }
             Opcode::DirectBitsRect => {
                 let pix_map = PixMap::parse(reader).await?;
+                if pix_map.base_addr != 0xFF {
+                    panic!("incompatible base address")
+                }
 
                 let source = Rectangle::parse(reader).await?;
                 let destination = Rectangle::parse(reader).await?;
                 let mode = reader.read_u16().await?;
 
+                let mut odd_bytes_count_read = false;
+
+                let bound_height = pix_map.bounds.bottom - pix_map.bounds.top;
                 let pix_data = match pix_map.pack_type {
                     1 => {
-                        // TODO also for row_bytes < 8
-                        let mut buf = vec![
-                            0;
-                            pix_map.row_bytes as usize
-                                * (pix_map.bounds.bottom_right.y - pix_map.bounds.top_left.y)
-                                    as usize
-                        ];
-                        reader.read_exact(&mut buf).await?;
-                        buf
+                        let size = pix_map.row_bytes as usize * bound_height as usize;
+
+                        let mut ret = vec![0; size];
+                        reader.read_exact(&mut ret).await?;
+                        odd_bytes_count_read = size % 2 == 1;
+
+                        ret
                     }
-                    _ => panic!("unexpected pack type: {}", pix_map.pack_type),
+                    4 => {
+                        let mut ret = Vec::new(); // TODO capacity
+
+                        for _ in 0..bound_height {
+                            let encoded_line_size = if pix_map.row_bytes > 250 {
+                                reader.read_u16().await? as usize
+                            } else {
+                                odd_bytes_count_read = !odd_bytes_count_read;
+                                reader.read_u8().await? as usize
+                            };
+
+                            let mut encoded_line = vec![0; encoded_line_size];
+                            reader.read_exact(&mut encoded_line).await?;
+                            odd_bytes_count_read ^= encoded_line_size % 2 == 1;
+
+                            let mut decoder = packbits::Decoder::new();
+                            let mut decoded = decoder.decode(encoded_line.as_slice());
+                            let mut line = Vec::with_capacity(encoded_line_size);
+                            while decoded.has_remaining() {
+                                let chunk = decoded.chunk();
+                                line.extend_from_slice(chunk);
+                                decoded.advance(chunk.len());
+                            }
+                            decoder.finalize().unwrap(); // TODO don't panic
+
+                            // each line is somewhat planar encoding of color
+                            // first all the red, then all the green, then blue
+                            let (r, gb) = line.split_at(line.len() / 3);
+                            let (g, b) = gb.split_at(line.len() / 3);
+                            assert_eq!(r.len(), g.len());
+                            assert_eq!(g.len(), b.len());
+
+                            ret.extend(
+                                r.iter()
+                                    .zip(g.iter())
+                                    .zip(b.iter())
+                                    .flat_map(|((a, b), c)| [a, b, c]),
+                            );
+                        }
+
+                        ret
+                    }
+                    _ => todo!("unsupported pack type: {}", pix_map.pack_type),
                 };
+
+                if odd_bytes_count_read {
+                    skip_filler(reader).await?;
+                }
 
                 Self::DirectBitsRect {
                     pix_map,

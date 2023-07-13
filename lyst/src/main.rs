@@ -2,7 +2,7 @@ use lyst::{
     mohawk::{Resource, ResourceID, TypeID},
     Mohawk,
 };
-use sdl2::image::LoadTexture;
+use sdl2::{image::LoadTexture, pixels::PixelFormatEnum};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -139,7 +139,21 @@ fn show_pict(pict: pict_decoder::PICT) -> Result<(), String> {
     let mut canvas = window.into_canvas().build().unwrap();
 
     let texture_creator = canvas.texture_creator();
-    let texture = texture_creator.load_texture_bytes(pict.as_ref()).unwrap();
+    let texture = match pict {
+        pict_decoder::PICT::JPEG(raw) => texture_creator.load_texture_bytes(&raw).unwrap(),
+        pict_decoder::PICT::RGB24 {
+            width,
+            height,
+            data,
+        } => {
+            let mut ret = texture_creator
+                .create_texture_streaming(PixelFormatEnum::RGB24, width as u32, height as u32)
+                .unwrap();
+            ret.with_lock(None, |buf, _| buf.copy_from_slice(&data))
+                .unwrap();
+            ret
+        }
+    };
 
     canvas.clear();
     let mut event_pump = sdl_context.event_pump().unwrap();

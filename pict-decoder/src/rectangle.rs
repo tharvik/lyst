@@ -1,17 +1,23 @@
-use tokio::io::AsyncRead;
+use tokio::io::{AsyncRead, AsyncReadExt};
 
-use crate::{point::Point, Result};
+use crate::Result;
 
+#[derive(Debug)]
+#[allow(dead_code)]
 pub(crate) struct Rectangle {
-    pub(crate) top_left: Point,
-    pub(crate) bottom_right: Point,
+    pub(crate) top: u16,
+    pub(crate) left: u16,
+    pub(crate) bottom: u16,
+    pub(crate) right: u16,
 }
 
 impl Rectangle {
     pub(crate) async fn parse(reader: &mut (impl AsyncRead + Unpin)) -> Result<Self> {
         Ok(Self {
-            top_left: Point::parse(reader).await?,
-            bottom_right: Point::parse(reader).await?,
+            top: reader.read_u16().await?,
+            left: reader.read_u16().await?,
+            bottom: reader.read_u16().await?,
+            right: reader.read_u16().await?,
         })
     }
 }

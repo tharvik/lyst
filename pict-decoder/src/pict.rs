@@ -14,7 +14,14 @@ use crate::{
 // https://www.fileformat.info/format/macpict/egff.htm
 // https://preterhuman.net/macstuff/insidemac/QuickDraw/QuickDraw-458.html
 
-pub struct PICT(Vec<u8>);
+pub enum PICT {
+    JPEG(Vec<u8>),
+    RGB24 {
+        width: usize,
+        height: usize,
+        data: Vec<u8>,
+    },
+}
 
 impl PICT {
     async fn expect_op(
@@ -76,7 +83,7 @@ impl PICT {
             }
         }
 
-        let mut raw = None;
+        let mut ret = None;
         while let Some(res) = opcodes.next().await {
             let op = res?;
             trace!("exec op: {}", op);
@@ -93,13 +100,24 @@ impl PICT {
                 | Operation::LongText { .. }
                 | Operation::LongComment { .. } => {} // TODO anything?
                 Operation::CompressedQuickTime { data, .. } => {
-                    if raw.is_some() {
+                    if ret.is_some() {
                         panic!("already got an image")
                     }
-                    raw = Some(data)
+                    ret = Some(Self::JPEG(data))
                 }
-                Operation::DirectBitsRect { .. } => {
-                    panic!("gotta canvas this")
+                Operation::DirectBitsRect {
+                    pix_data,
+                    destination,
+                    ..
+                } => {
+                    if ret.is_some() {
+                        panic!("already got an image")
+                    }
+                    ret = Some(Self::RGB24 {
+                        width: (destination.right - destination.left) as usize,
+                        height: (destination.bottom - destination.top) as usize,
+                        data: pix_data,
+                    })
                 }
                 Operation::VersionOp | Operation::Version | Operation::HeaderOp { .. } => {
                     return Err(UnexpectedOpcode(op.opcode() as u16))
@@ -108,12 +126,6 @@ impl PICT {
             }
         }
 
-        raw.ok_or(UnableToFindImage).map(PICT)
-    }
-}
-
-impl AsRef<[u8]> for PICT {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
+        ret.ok_or(UnableToFindImage)
     }
 }

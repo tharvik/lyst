@@ -8,7 +8,6 @@ license = "AGPL-3.0-only"
 [dependencies]
 async-stream = "0.3"
 clap = { version = "4", features = ["derive"] }
-encoding_rs = "0.8"
 pict-decoder = { path = "../pict-decoder" }
 pin-project = "1"
 sdl2 = { version = "0.35", default-features = false, features = [
