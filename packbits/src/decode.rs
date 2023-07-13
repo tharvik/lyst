@@ -70,10 +70,10 @@ impl Decoder {
     ///
     /// There is no data returned as [`Self::decode`] processes data eagerly
     pub fn finalize(&mut self) -> Result<()> {
-        match &mut self.0 {
+        match self.0 {
             State::Idle => Ok(()),
             State::Repeat { .. } => Err(Error::DanglingRepeated),
-            State::Literal { .. } => Err(Error::DanglingLiteral),
+            State::Literal { remaining } => Err(Error::DanglingLiteral(remaining)),
         }
     }
 }

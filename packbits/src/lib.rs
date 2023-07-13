@@ -6,9 +6,9 @@ pub use encode::Encoder;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("unfinished literal")]
-    DanglingLiteral,
-    #[error("unfinished repeated")]
+    #[error("unfinished literal: {0} more bytes needed")]
+    DanglingLiteral(usize),
+    #[error("unfinished repeated: 1 more byte needed")]
     DanglingRepeated,
 }
 
