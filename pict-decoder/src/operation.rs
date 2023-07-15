@@ -1,9 +1,9 @@
-use std::{fmt, vec};
+use std::{cmp, fmt, vec};
 
 use bytes::Buf;
 use encoding_rs::WINDOWS_1252;
 use strum::FromRepr;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
+use tracing::warn;
 
 use crate::{
     pixmap::PixMap,
@@ -108,65 +108,86 @@ impl Operation {
         }
     }
 
-    pub(crate) async fn parse(reader: &mut (impl AsyncRead + AsyncSeek + Unpin)) -> Result<Self> {
-        let pos = reader.stream_position().await?;
+    pub(crate) fn parse(mut buf: impl Buf) -> Result<Self> {
+        let pos = buf.remaining();
 
-        let raw = reader.read_u16().await?;
+        let raw = buf.get_u16();
         let opcode = Opcode::from_repr(raw).ok_or(Error::UnsupportedOpcode(raw))?;
 
         let op = match opcode {
             Opcode::Nop => Self::Nop,
             Opcode::Clip => Self::Clip {
-                size: reader.read_u16().await?,
-                bounding: Rectangle::parse(reader).await?,
+                size: buf.get_u16(),
+                bounding: Rectangle::parse(&mut buf)?,
             },
-            Opcode::TxFont => Self::TxFont(reader.read_i16().await?),
+            Opcode::TxFont => Self::TxFont(buf.get_i16()),
             Opcode::TxFace => {
-                let ret = Self::TxFace(reader.read_u8().await?);
-                skip_filler(reader).await?;
+                let ret = Self::TxFace(buf.get_u8());
+                skip_filler(&mut buf)?;
                 ret
             }
-            Opcode::PnSize => Self::PnSize(Point::parse(reader).await?),
-            Opcode::TxSize => Self::TxSize(reader.read_i16().await?),
+            Opcode::PnSize => Self::PnSize(Point::parse(&mut buf)?),
+            Opcode::TxSize => Self::TxSize(buf.get_i16()),
             Opcode::TxRatio => Self::TxRatio {
-                numerator: Point::parse(reader).await?,
-                denominator: Point::parse(reader).await?,
+                numerator: Point::parse(&mut buf)?,
+                denominator: Point::parse(&mut buf)?,
             },
             Opcode::VersionOp => Self::VersionOp,
             Opcode::DefHilite => Self::DefHilite,
             Opcode::LongText => {
-                let location = Point::parse(reader).await?;
-                let count = reader.read_u8().await?;
+                let location = Point::parse(&mut buf)?;
+                let mut count = buf.get_u8() as usize;
+                let need_filler = count % 2 == 0;
 
                 // no documentation of text format itself
                 // MYST.DAT:4001 isn't UTF-8
 
-                let mut raw = vec![0u8; count as usize];
-                reader.read_exact(&mut raw).await?;
-                let text = WINDOWS_1252
-                    .decode_without_bom_handling_and_without_replacement(&raw)
-                    .ok_or(Error::InvalidCP1252Format)?;
+                let mut decoder = WINDOWS_1252.new_decoder_without_bom_handling();
+                let mut text = String::with_capacity(count);
+                loop {
+                    let chunk = buf.chunk();
+                    let chunk_size = cmp::min(chunk.len(), count);
+                    let last_chunk = chunk_size == count;
 
-                if count % 2 == 0
+                    let (ret, read) = decoder.decode_to_string_without_replacement(
+                        &chunk[..chunk_size],
+                        &mut text,
+                        last_chunk,
+                    );
+
+                    buf.advance(read);
+                    count -= read;
+
+                    match ret {
+                        encoding_rs::DecoderResult::InputEmpty if last_chunk => break,
+                        encoding_rs::DecoderResult::InputEmpty => return Err(Error::UnexpectedEOB),
+                        encoding_rs::DecoderResult::OutputFull => {
+                            warn!("realocating string");
+                            text.reserve(1) // TODO how much to reserve?
+                        }
+                        encoding_rs::DecoderResult::Malformed(_, _) => {
+                            return Err(Error::InvalidCP1252Format)
+                        }
+                    }
+                }
+
+                if need_filler
                 // count is a byte so we start at odd bytes
                 {
-                    skip_filler(reader).await?;
+                    skip_filler(&mut buf)?;
                 }
 
-                Self::LongText {
-                    location,
-                    text: text.into_owned(),
-                }
+                Self::LongText { location, text }
             }
             Opcode::DirectBitsRect => {
-                let pix_map = PixMap::parse(reader).await?;
+                let pix_map = PixMap::parse(&mut buf)?;
                 if pix_map.base_addr != 0xFF {
                     panic!("incompatible base address")
                 }
 
-                let source = Rectangle::parse(reader).await?;
-                let destination = Rectangle::parse(reader).await?;
-                let mode = reader.read_u16().await?;
+                let source = Rectangle::parse(&mut buf)?;
+                let destination = Rectangle::parse(&mut buf)?;
+                let mode = buf.get_u16();
 
                 let mut odd_bytes_count_read = false;
 
@@ -176,7 +197,7 @@ impl Operation {
                         let size = pix_map.row_bytes as usize * bound_height as usize;
 
                         let mut ret = vec![0; size];
-                        reader.read_exact(&mut ret).await?;
+                        buf.copy_to_slice(&mut ret);
                         odd_bytes_count_read = size % 2 == 1;
 
                         ret
@@ -186,14 +207,14 @@ impl Operation {
 
                         for _ in 0..bound_height {
                             let encoded_line_size = if pix_map.row_bytes > 250 {
-                                reader.read_u16().await? as usize
+                                buf.get_u16() as usize
                             } else {
                                 odd_bytes_count_read = !odd_bytes_count_read;
-                                reader.read_u8().await? as usize
+                                buf.get_u8() as usize
                             };
 
                             let mut encoded_line = vec![0; encoded_line_size];
-                            reader.read_exact(&mut encoded_line).await?;
+                            buf.copy_to_slice(&mut encoded_line);
                             odd_bytes_count_read ^= encoded_line_size % 2 == 1;
 
                             let mut decoder = packbits::Decoder::new();
@@ -227,7 +248,7 @@ impl Operation {
                 };
 
                 if odd_bytes_count_read {
-                    skip_filler(reader).await?;
+                    skip_filler(&mut buf)?;
                 }
 
                 Self::DirectBitsRect {
@@ -239,11 +260,11 @@ impl Operation {
                 }
             }
             Opcode::LongComment => {
-                let kind = reader.read_i16().await?;
-                let size = reader.read_u16().await?;
+                let kind = buf.get_i16();
+                let size = buf.get_u16();
 
                 let mut raw = vec![0u8; size as usize];
-                reader.read_exact(&mut raw).await?;
+                buf.copy_to_slice(&mut raw);
                 let text = WINDOWS_1252
                     .decode_without_bom_handling_and_without_replacement(&raw)
                     .ok_or(Error::InvalidCP1252Format)?;
@@ -256,11 +277,11 @@ impl Operation {
             Opcode::OpEndPic => Self::OpEndPic, // doc says 2 bytes extra but not reality
             Opcode::Version => Self::Version,
             Opcode::HeaderOp => {
-                let version = reader.read_i16().await?;
-                skip_reserved::<2>(reader).await?;
-                let resolution = (reader.read_u32().await?, reader.read_u32().await?);
-                let source_rect = Rectangle::parse(reader).await?;
-                skip_reserved::<4>(reader).await?;
+                let version = buf.get_i16();
+                skip_reserved(&mut buf, 2)?;
+                let resolution = (buf.get_u32(), buf.get_u32());
+                let source_rect = Rectangle::parse(&mut buf)?;
+                skip_reserved(&mut buf, 4)?;
 
                 Self::HeaderOp {
                     version,
@@ -271,36 +292,36 @@ impl Operation {
             Opcode::CompressedQuickTime => {
                 // https://web.archive.org/web/20030827061809/http://developer.apple.com/documentation/QuickTime/INMAC/QT/iqImageCompMgr.a.htm
 
-                let size = reader.read_u32().await?;
+                let size = buf.get_u32();
                 if size % 2 != 0 {
                     panic!("uneven size so padding is wrong")
                 }
 
-                let version = reader.read_u16().await?;
-                let transformation = Matrix::parse(reader).await?;
-                let matte_size = reader.read_u32().await?;
-                let matte_rect = Rectangle::parse(reader).await?;
-                let mode = reader.read_u16().await?;
-                let source = Rectangle::parse(reader).await?;
-                let accuracy = reader.read_u32().await?;
-                let mask_size = reader.read_u32().await?;
+                let version = buf.get_u16();
+                let transformation = Matrix::parse(&mut buf)?;
+                let matte_size = buf.get_u32();
+                let matte_rect = Rectangle::parse(&mut buf)?;
+                let mode = buf.get_u16();
+                let source = Rectangle::parse(&mut buf)?;
+                let accuracy = buf.get_u32();
+                let mask_size = buf.get_u32();
 
                 if matte_size > 0 {
                     panic!("doc not precise on how to handle matte")
                 }
 
                 let mask = if mask_size > 0 {
-                    let mut buf = vec![0; mask_size as usize];
-                    reader.read_exact(&mut buf).await?;
-                    Some(buf)
+                    let mut ret = vec![0; mask_size as usize];
+                    buf.copy_to_slice(&mut ret);
+                    Some(ret)
                 } else {
                     None
                 };
 
-                let img_desc = ImageDescription::parse(reader).await?;
+                let img_desc = ImageDescription::parse(&mut buf)?;
 
                 let mut data = vec![0; img_desc.data_size as usize];
-                reader.read_exact(&mut data).await?;
+                buf.copy_to_slice(&mut data);
 
                 // img_desc.data_size might not run to the end of the opcode
                 let diff =
@@ -309,7 +330,7 @@ impl Operation {
                     panic!("too much padding")
                 }
                 if diff != 0 {
-                    skip_filler(reader).await?;
+                    skip_filler(&mut buf)?;
                 }
 
                 Self::CompressedQuickTime {
@@ -327,7 +348,7 @@ impl Operation {
 
         assert_eq!(op.opcode(), opcode, "wrong operation returned for opcode",);
         assert!(
-            (reader.stream_position().await? - pos) % 2 == 0,
+            (pos - buf.remaining()) % 2 == 0,
             "{} should be 2 bytes aligned",
             op.opcode(),
         );

@@ -944,18 +944,12 @@ checksum = "9b2a4787296e9989611394c33f193f676704af1686e70b8f8033ab5ba9a35a94"
 name = "pict-decoder"
 version = "0.1.0"
 dependencies = [
- "async-stream",
  "bytes",
- "criterion",
  "encoding_rs",
  "packbits",
  "strum",
- "test-log",
  "thiserror",
- "tokio",
- "tokio-stream",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
-use tokio::io::{AsyncRead, AsyncReadExt};
+use bytes::Buf;
 
-use crate::Result;
+use crate::{utils::ensure_remains_bytes, Result};
 
 #[allow(dead_code)]
 pub(crate) struct Point {
@@ -9,10 +9,12 @@ pub(crate) struct Point {
 }
 
 impl Point {
-    pub(crate) async fn parse(reader: &mut (impl AsyncRead + Unpin)) -> Result<Self> {
+    pub(crate) fn parse(buf: impl Buf) -> Result<Self> {
+        let mut buf = ensure_remains_bytes(buf, 4)?;
+
         Ok(Self {
-            x: reader.read_u16().await?,
-            y: reader.read_u16().await?,
+            x: buf.get_u16(),
+            y: buf.get_u16(),
         })
     }
 }

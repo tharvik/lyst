@@ -1,9 +1,12 @@
-use tokio::io::{AsyncRead, AsyncReadExt};
-
+use bytes::Buf;
 use strum::FromRepr;
 use tracing::warn;
 
-use crate::{rectangle::Rectangle, utils::skip_reserved, Result};
+use crate::{
+    rectangle::Rectangle,
+    utils::{ensure_remains_bytes, skip_reserved},
+    Result,
+};
 
 #[derive(FromRepr)]
 #[repr(u16)]
@@ -32,13 +35,15 @@ pub(crate) struct PixMap {
 }
 
 impl PixMap {
-    pub(crate) async fn parse(reader: &mut (impl AsyncRead + Unpin)) -> Result<Self> {
-        let base_addr = reader.read_u32().await?;
+    pub(crate) fn parse(buf: impl Buf) -> Result<Self> {
+        let mut buf = ensure_remains_bytes(buf, 46)?;
+
+        let base_addr = buf.get_u32();
         if base_addr % 4 != 0 {
             warn!("unoptimal PixMap base addr")
         }
 
-        let row_bytes_and_flag = reader.read_u16().await?;
+        let row_bytes_and_flag = buf.get_u16();
         let row_bytes = row_bytes_and_flag & 0x3fff;
         if row_bytes % 2 != 0 || row_bytes >= 0x4000 {
             panic!("invalid row bytes")
@@ -52,30 +57,29 @@ impl PixMap {
         }
         let pointed_is_pixmap_record = flags == 0b10;
 
-        let bounds = Rectangle::parse(reader).await?;
-        let version = reader.read_u16().await?;
+        let bounds = Rectangle::parse(&mut buf)?;
+        let version = buf.get_u16();
         if version != 0 {
             panic!("unexpected version: {}", version)
         }
 
-        let pack_type = reader.read_u16().await?;
+        let pack_type = buf.get_u16();
         if pack_type >= 5 {
             panic!("unsupported pack_type: {}", pack_type)
         }
-        let pack_size = reader.read_u32().await?;
+        let pack_size = buf.get_u32();
         if pack_type == 0 && pack_size != 0 {
             panic!("image not packed but pack size not zero: {}", pack_size)
         }
-        let horizontal_resolution = reader.read_u32().await?;
-        let vertical_resolution = reader.read_u32().await?;
-        let pixel_type =
-            PixelType::from_repr(reader.read_u16().await?).expect("to be a valid pixel type");
-        let pixel_size = reader.read_u16().await?;
-        let components_count = reader.read_u16().await?;
-        let components_size = reader.read_u16().await?;
-        let plane_offset = reader.read_u32().await?;
-        let color_table_addr = reader.read_u32().await?;
-        skip_reserved::<4>(reader).await?;
+        let horizontal_resolution = buf.get_u32();
+        let vertical_resolution = buf.get_u32();
+        let pixel_type = PixelType::from_repr(buf.get_u16()).expect("to be a valid pixel type");
+        let pixel_size = buf.get_u16();
+        let components_count = buf.get_u16();
+        let components_size = buf.get_u16();
+        let plane_offset = buf.get_u32();
+        let color_table_addr = buf.get_u32();
+        skip_reserved(buf, 4)?;
 
         Ok(Self {
             base_addr,

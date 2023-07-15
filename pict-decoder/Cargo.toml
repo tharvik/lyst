@@ -6,24 +6,9 @@ edition = "2021"
 license = "AGPL-3.0-only"
 
 [dependencies]
-async-stream = "0.3"
 bytes = "1"
 encoding_rs = "0.8"
 packbits = { version = "0.1.0", path = "../packbits" }
 strum = { version = "0.25", features = ["derive"] }
 thiserror = "1"
-tokio = { version = "1", features = [
-  "io-util",
-  #"io-std",
-  "macros",
-  #"rt",
-  #"rt-multi-thread",
-] }
-tokio-stream = "0.1"
 tracing = "0.1"
-tracing-subscriber = "0.3"
-
-[dev-dependencies]
-criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
-test-log = { version = "0.2", default-features = false, features = ["trace"] }
-tokio = { version = "1", features = ["tracing"] }

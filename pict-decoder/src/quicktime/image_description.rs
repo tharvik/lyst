@@ -1,13 +1,16 @@
-use std::io;
-
-use tokio::io::{AsyncRead, AsyncReadExt};
+use bytes::Buf;
 use tracing::warn;
 
-use crate::{utils::skip_reserved, Result};
+use crate::{
+    utils::{ensure_remains_bytes, skip_reserved},
+    Result,
+};
 
-async fn read_4_bytes(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<[u8; 4]> {
+fn read_4_bytes(buf: impl Buf) -> Result<[u8; 4]> {
+    let mut buf = ensure_remains_bytes(buf, 4)?;
+
     let mut buffer = [0u8; 4];
-    reader.read_exact(&mut buffer).await?;
+    buf.copy_to_slice(&mut buffer);
 
     Ok(buffer)
 }
@@ -34,37 +37,39 @@ pub(crate) struct ImageDescription {
 impl ImageDescription {
     pub(crate) const RAW_SIZE: usize = 86;
 
-    pub(crate) async fn parse(reader: &mut (impl AsyncRead + Unpin)) -> Result<Self> {
-        let struct_size = reader.read_u32().await?;
-        if struct_size != 86 {
+    pub(crate) fn parse(buf: impl Buf) -> Result<Self> {
+        let mut buf = ensure_remains_bytes(buf, Self::RAW_SIZE)?;
+
+        let struct_size = buf.get_u32();
+        if struct_size as usize != Self::RAW_SIZE {
             panic!("unexpected struct size: {}", struct_size)
         }
-        let compressor_type = read_4_bytes(reader).await?;
-        skip_reserved::<8>(reader).await?;
-        let version = reader.read_u16().await?;
-        let revision = reader.read_u16().await?;
-        let vendor = read_4_bytes(reader).await?;
-        let temporal_quality = reader.read_u32().await?;
-        let spatial_quality = reader.read_u32().await?;
-        let width = reader.read_u16().await?;
-        let height = reader.read_u16().await?;
-        let horizontal_resolution = reader.read_u32().await?;
-        let vertical_resolution = reader.read_u32().await?;
-        let data_size = reader.read_u32().await?;
-        let frame_count = reader.read_u16().await?;
+        let compressor_type = read_4_bytes(&mut buf)?;
+        skip_reserved(&mut buf, 8)?;
+        let version = buf.get_u16();
+        let revision = buf.get_u16();
+        let vendor = read_4_bytes(&mut buf)?;
+        let temporal_quality = buf.get_u32();
+        let spatial_quality = buf.get_u32();
+        let width = buf.get_u16();
+        let height = buf.get_u16();
+        let horizontal_resolution = buf.get_u32();
+        let vertical_resolution = buf.get_u32();
+        let data_size = buf.get_u32();
+        let frame_count = buf.get_u16();
 
         // pascal string
-        let name_size = reader.read_u8().await?;
+        let name_size = buf.get_u8();
         let mut raw = vec![0; 31]; // 31 bytes every time
-        reader.read_exact(&mut raw).await?;
+        buf.copy_to_slice(&mut raw);
         let rem = raw.split_off(name_size as usize);
         if rem.into_iter().any(|c| c != 0) {
             warn!("got data after string's end")
         }
         let name = String::from_utf8(raw)?;
 
-        let depth = reader.read_u16().await?;
-        let color_table_id = reader.read_u16().await?;
+        let depth = buf.get_u16();
+        let color_table_id = buf.get_u16();
 
         Ok(Self {
             compressor_type,

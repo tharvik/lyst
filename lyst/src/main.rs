@@ -195,7 +195,7 @@ async fn extract(
                 .get(resource_id)
                 .ok_or(ResourceNotFound)?;
 
-            io::copy(&mut resource.read(), &mut stdout())
+            io::copy(&mut resource.reader(), &mut stdout())
                 .await
                 .map(|_| ())
                 .map_err(WriteExtracted)?;

@@ -1,7 +1,7 @@
 use core::fmt;
 use std::{collections::HashMap, fmt::Write, io::SeekFrom, path::Path, string};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt};
-use tracing::{trace, trace_span, warn, Instrument};
+use tracing::{trace, trace_span, warn};
 
 use async_stream::try_stream;
 use tokio_stream::StreamExt;
@@ -58,7 +58,7 @@ impl Resource {
         Ok(Self { name, file, reader })
     }
 
-    pub fn read(&self) -> Reader {
+    pub fn reader(&self) -> Reader {
         Reader::take(&self.reader, self.file.size as usize)
     }
 }
@@ -260,12 +260,13 @@ impl Mohawk {
 
         let res = self.types.get(&TypeID::PICT).and_then(|m| m.get(id))?;
 
-        Some(
-            pict_decoder::PICT::parse(res.read())
-                .instrument(trace_span!("parse PICT", id))
-                .await
-                .map_err(Error::PICT),
-        )
+        let mut buf = Vec::new();
+        let read = res.reader().read_to_end(&mut buf).await;
+        if let Err(e) = read {
+            return Some(Err(Error::Reader(e)));
+        }
+
+        Some(pict_decoder::PICT::parse(buf.as_slice()).map_err(Error::PICT))
     }
 }
 
