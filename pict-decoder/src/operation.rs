@@ -3,7 +3,7 @@ use std::{cmp, vec};
 use bytes::Buf;
 use encoding_rs::WINDOWS_1252;
 use strum::FromRepr;
-use tracing::{trace, trace_span};
+use tracing::trace_span;
 
 use crate::{
     pixmap::PixMap,
