@@ -4,7 +4,7 @@ use bytes::Buf;
 
 use crate::{Error, Result};
 
-pub fn ensure_remains_bytes(buf: impl Buf, amount: usize) -> Result<impl Buf> {
+pub(crate) fn ensure_remains_bytes(buf: impl Buf, amount: usize) -> Result<impl Buf> {
     if buf.remaining() < amount {
         return Err(Error::UnexpectedEOB);
     }
@@ -12,7 +12,7 @@ pub fn ensure_remains_bytes(buf: impl Buf, amount: usize) -> Result<impl Buf> {
     Ok(buf.take(amount))
 }
 
-pub fn skip_filler(mut buf: impl Buf) -> Result<()> {
+pub(crate) fn skip_filler(mut buf: impl Buf) -> Result<()> {
     let fill = buf.get_u8();
     if fill != 0 {
         return Err(Error::InvalidFiller(fill));
@@ -21,7 +21,7 @@ pub fn skip_filler(mut buf: impl Buf) -> Result<()> {
     Ok(())
 }
 
-pub fn skip_reserved(buf: impl Buf, amount: usize) -> Result<()> {
+pub(crate) fn skip_reserved(buf: impl Buf, amount: usize) -> Result<()> {
     let mut buf = ensure_remains_bytes(buf, amount)?;
 
     let unexpected_count: usize = (0..amount)
