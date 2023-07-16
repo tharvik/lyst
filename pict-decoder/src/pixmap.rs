@@ -1,6 +1,6 @@
 use bytes::Buf;
 use strum::FromRepr;
-use tracing::warn;
+use tracing::{trace_span, warn};
 
 use crate::{
     rectangle::Rectangle,
@@ -36,11 +36,16 @@ pub(crate) struct PixMap {
 
 impl PixMap {
     pub(crate) fn parse(buf: impl Buf) -> Result<Self> {
-        let mut buf = ensure_remains_bytes(buf, 46)?;
+        let _span_ = trace_span!("parse PixMap").entered();
+
+        let mut buf = ensure_remains_bytes(buf, 50)?;
 
         let base_addr = buf.get_u32();
         if base_addr % 4 != 0 {
-            warn!("unoptimal PixMap base addr")
+            warn!(
+                "suboptimal base addr: 0x{:08x} is not a 4 bytes aligned",
+                base_addr
+            )
         }
 
         let row_bytes_and_flag = buf.get_u16();

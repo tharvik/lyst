@@ -1,7 +1,7 @@
 use core::fmt;
 use std::{collections::HashMap, fmt::Write, io::SeekFrom, path::Path, string};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt};
-use tracing::{trace, trace_span, warn};
+use tracing::{trace, trace_span, warn, Instrument};
 
 use async_stream::try_stream;
 use tokio_stream::StreamExt;
@@ -257,17 +257,19 @@ impl Mohawk {
     }
 
     pub async fn get_pict(&self, id: &ResourceID) -> Option<Result<pict_decoder::PICT>> {
-        trace!("get pict");
+        async move {
+            let res = self.types.get(&TypeID::PICT).and_then(|m| m.get(id))?;
 
-        let res = self.types.get(&TypeID::PICT).and_then(|m| m.get(id))?;
+            let mut buf = Vec::new();
+            let read = res.reader().read_to_end(&mut buf).await;
+            if let Err(e) = read {
+                return Some(Err(Error::Reader(e)));
+            }
 
-        let mut buf = Vec::new();
-        let read = res.reader().read_to_end(&mut buf).await;
-        if let Err(e) = read {
-            return Some(Err(Error::Reader(e)));
+            Some(pict_decoder::PICT::parse(buf.as_slice()).map_err(Error::PICT))
         }
-
-        Some(pict_decoder::PICT::parse(buf.as_slice()).map_err(Error::PICT))
+        .instrument(trace_span!("get pict", id))
+        .await
     }
 }
 

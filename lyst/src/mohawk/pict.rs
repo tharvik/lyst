@@ -15,7 +15,7 @@ mod tests {
             for id in mohawk
                 .types
                 .get(&TypeID::PICT)
-                .expect("contain PICT")
+                .expect("contains PICT")
                 .keys()
             {
                 mohawk.get_pict(id).await.unwrap().expect("parse PICT");

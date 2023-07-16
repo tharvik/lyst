@@ -6,6 +6,10 @@ use crate::{Error, Result};
 
 pub(crate) fn ensure_remains_bytes(buf: impl Buf, amount: usize) -> Result<impl Buf> {
     if buf.remaining() < amount {
+        warn!(
+            "buffer is missing at least {} bytes",
+            amount - buf.remaining()
+        );
         return Err(Error::UnexpectedEOB);
     }
 

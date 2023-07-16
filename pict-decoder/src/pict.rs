@@ -1,7 +1,7 @@
 use std::iter;
 
 use bytes::Buf;
-use tracing::trace;
+use tracing::trace_span;
 
 use crate::{
     operation::{Opcode, Operation},
@@ -62,7 +62,7 @@ impl PICT {
         let mut ret = None;
         for res in opcodes.by_ref() {
             let op = res?;
-            trace!("exec op: {}", op);
+            let _span_ = trace_span!("exec", %op).entered();
 
             match op {
                 Operation::Nop => {}

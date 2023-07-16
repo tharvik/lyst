@@ -1,9 +1,9 @@
-use std::{cmp, fmt, vec};
+use std::{cmp, vec};
 
 use bytes::Buf;
 use encoding_rs::WINDOWS_1252;
 use strum::FromRepr;
-use tracing::warn;
+use tracing::{trace, trace_span};
 
 use crate::{
     pixmap::PixMap,
@@ -35,6 +35,7 @@ pub(crate) enum Opcode {
     CompressedQuickTime = 0x8200,
 }
 
+#[derive(strum::Display)]
 #[allow(dead_code)]
 pub(crate) enum Operation {
     Nop,
@@ -113,6 +114,8 @@ impl Operation {
 
         let raw = buf.get_u16();
         let opcode = Opcode::from_repr(raw).ok_or(Error::UnsupportedOpcode(raw))?;
+
+        let _span_ = trace_span!("parse", %opcode).entered();
 
         let op = match opcode {
             Opcode::Nop => Self::Nop,
@@ -352,11 +355,5 @@ impl Operation {
         );
 
         Ok(op)
-    }
-}
-
-impl fmt::Display for Operation {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_fmt(format_args!("{:04X}", self.opcode() as u16))
     }
 }

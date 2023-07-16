@@ -1,4 +1,5 @@
 use bytes::Buf;
+use tracing::trace_span;
 
 use crate::{utils::ensure_remains_bytes, Result};
 
@@ -13,6 +14,8 @@ pub(crate) struct Rectangle {
 
 impl Rectangle {
     pub(crate) fn parse(buf: impl Buf) -> Result<Self> {
+        let _span_ = trace_span!("parse Rectangle").entered();
+
         let mut buf = ensure_remains_bytes(buf, 8)?;
 
         Ok(Self {
