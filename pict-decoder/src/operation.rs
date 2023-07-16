@@ -161,15 +161,13 @@ impl Operation {
                     match ret {
                         encoding_rs::DecoderResult::InputEmpty if last_chunk => break,
                         encoding_rs::DecoderResult::InputEmpty => return Err(Error::UnexpectedEOB),
-                        encoding_rs::DecoderResult::OutputFull => {
-                            warn!("realocating string");
-                            text.reserve(1) // TODO how much to reserve?
-                        }
+                        encoding_rs::DecoderResult::OutputFull => text.reserve(1),
                         encoding_rs::DecoderResult::Malformed(_, _) => {
                             return Err(Error::InvalidCP1252Format)
                         }
                     }
                 }
+                text.shrink_to_fit();
 
                 if need_filler
                 // count is a byte so we start at odd bytes
