@@ -6,6 +6,7 @@ use tracing::{trace, trace_span, warn};
 use async_stream::try_stream;
 use tokio_stream::StreamExt;
 
+mod pict;
 mod reader;
 use reader::Reader;
 
